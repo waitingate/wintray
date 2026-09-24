@@ -1,11 +1,7 @@
 MIT License
 
 Copyright (c) 2026 Toby H.
-
-The API design is based on tray by Serge Zaitsev
-(https://github.com/zserge/tray) and its fork dmikushin/tray
-(https://github.com/dmikushin/tray):
-Copyright (c) 2017 Serge Zaitsev, also under the MIT License.
+Copyright (c) 2017 Serge Zaitsev (API design, https://github.com/zserge/tray)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
