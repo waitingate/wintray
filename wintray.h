@@ -3,7 +3,7 @@
 // Based on the API of tray by Serge Zaitsev (https://github.com/zserge/tray)
 // and its fork dmikushin/tray, with the names prefixed wintray_.
 //
-//   - icon from the exe's resources (icon_id) or from an .ico file
+//   - icon from a resource (icon_id) or from an .ico file
 //   - UTF-8 strings
 //   - the icon is re-added after an Explorer restart, and retried if adding fails
 //   - wintray_update() and wintray_exit() are safe to call while the menu is open
@@ -20,7 +20,7 @@
 // The library keeps pointers to the wintray struct and the menu arrays, so they
 // must stay valid while the icon exists (static or global).
 //
-// Limits: one icon per process, 256 menu items, 64 submenus, 8 submenu levels,
+// Limits: one icon per process, 256 menu items, 256 submenus, 8 submenu levels,
 // 255 characters per menu item and 127 for the tooltip. Windows 7 or later.
 
 #ifndef WINTRAY_H

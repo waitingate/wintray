@@ -1,0 +1,22 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MinGW-w64
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64
+      - name: Build for Windows, 64 and 32 bit
+        run: |
+          for t in x86_64 i686; do
+            $t-w64-mingw32-gcc -std=c99 -Os -Wall -Wextra -Wpedantic -Werror -c wintray.c -o wintray-$t.o
+            # No C runtime: every undefined symbol must be a Win32 import.
+            if $t-w64-mingw32-nm -u wintray-$t.o | grep -v __imp_; then exit 1; fi
+          done
+      - name: Run the tests
+        run: |
+          sudo sysctl vm.mmap_rnd_bits=28   # AddressSanitizer fails with more on newer kernels
+          sh test/run.sh

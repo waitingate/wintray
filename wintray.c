@@ -9,10 +9,14 @@
 #define ID_FIRST    1000             // first menu command ID
 #define MAX_ITEMS   256
 #define MAX_DEPTH   8                // max submenu nesting
-#define MAX_MENUS   64               // max submenus in total, in case a menu
+#define MAX_MENUS   256              // max submenus in total, in case a menu
                                      // contains itself
 #define RETRY_TIMER 1
+#define CLASS_NAME  L"WintrayWindow"
 
+// wnd_proc() can run again inside TrackPopupMenu, Shell_NotifyIconW (it waits
+// for Explorer) and the user's callbacks. Update the state below before
+// calling them, and check it again after they return.
 static struct wintray *g_tray;
 static NOTIFYICONDATAW nid;
 static HWND  hwnd;
@@ -79,9 +83,14 @@ static HMENU build_menu(struct wintray_menu_item *m, int depth)
 // always gives the exe.
 static HINSTANCE this_module(void)
 {
-    HMODULE m = NULL;
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)&g_tray, &m);
+    static HMODULE m;
+    if (!m) {
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCWSTR)&g_tray, &m);
+        if (!m)                      // e.g. a DLL loaded from memory
+            m = GetModuleHandleW(NULL);
+    }
     return m;
 }
 
@@ -90,8 +99,12 @@ static HICON load_icon(const struct wintray *t)
     int cx = GetSystemMetrics(SM_CXSMICON), cy = GetSystemMetrics(SM_CYSMICON);
     HICON h = NULL;
     if (t->icon_id) {
+        // Look in the DLL wintray is built into first (if any), then in the exe.
         h = (HICON)LoadImageW(this_module(), MAKEINTRESOURCEW(t->icon_id),
                               IMAGE_ICON, cx, cy, 0);
+        if (!h)
+            h = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(t->icon_id),
+                                  IMAGE_ICON, cx, cy, 0);
     } else if (t->icon_filepath) {
         wchar_t path[MAX_PATH];
         to_wide(t->icon_filepath, path, MAX_PATH);
@@ -210,9 +223,10 @@ int wintray_init(struct wintray *tray)
     WNDCLASSW wc = {0};
     wc.lpfnWndProc   = wnd_proc;
     wc.hInstance     = this_module();
-    wc.lpszClassName = L"WintrayWindow";
-    // A reloaded DLL can still have its old class, with a wnd_proc that's
-    // gone, so remove it before registering.
+    wc.lpszClassName = CLASS_NAME;
+    // Remove any old registration first. One is left over if the window was
+    // closed from outside, and after a DLL reload it points to a wnd_proc
+    // that no longer exists.
     UnregisterClassW(wc.lpszClassName, wc.hInstance);
     if (!RegisterClassW(&wc))
         return -1;
@@ -276,6 +290,9 @@ void wintray_update(struct wintray *tray)
 
 void wintray_exit(void)
 {
-    if (hwnd)
+    if (hwnd) {
         DestroyWindow(hwnd);         // the rest happens in WM_DESTROY
+        // Windows doesn't unregister a DLL's classes when the DLL is unloaded.
+        UnregisterClassW(CLASS_NAME, this_module());
+    }
 }
