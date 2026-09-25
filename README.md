@@ -89,8 +89,11 @@ struct wintray *wintray_get_instance(void);
 
 ## Limits
 
-One icon per process, up to 256 menu items and 64 submenus (8 levels deep),
+One icon per process, up to 256 menu items and 256 submenus (8 levels deep),
 255 characters per menu item and 127 for the tooltip. Windows 7 or later.
+
+It works in an exe or a DLL. In a DLL, run it on its own thread, since
+`wintray_exit()` posts `WM_QUIT`, and call `wintray_exit()` before unloading.
 
 ## Coming from zserge/tray or dmikushin/tray
 
@@ -108,6 +111,11 @@ your initializers.
 
 Tested with MinGW-w64 GCC 13.2 (WinLibs), with the test programs running under
 Wine.
+
+On Linux, `sh test/run.sh` tests the library against fake Win32 functions,
+including clicks at awkward moments. GitHub Actions runs it on every push.
+Before a release, also check by hand that a double-click calls `cb` once, a
+fast double right-click opens one menu, and the icon from `icon_id` shows.
 
 ## License
 
