@@ -53,7 +53,7 @@ struct wintray *wintray_get_instance(void);
 int  wintray_init(struct wintray *tray);    // 0 on success, -1 on error or if already running
 int  wintray_loop(int blocking);            // returns -1 once the tray has been closed
 void wintray_update(struct wintray *tray);  // call after changing the icon, tooltip or menu
-void wintray_exit(void);
+void wintray_exit(void);                    // removes the icon and posts WM_QUIT
 
 #ifdef __cplusplus
 }

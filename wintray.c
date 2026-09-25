@@ -102,6 +102,8 @@ static void show_icon(void)
 
 static void show_menu(void)
 {
+    if (menu_open)                   // icon clicked again while the menu is open
+        return;
     POINT p = {0, 0};
     GetCursorPos(&p);
     // SetForegroundWindow before and WM_NULL after are both needed for tray
@@ -129,8 +131,10 @@ static void show_menu(void)
 // someone else (taskkill without /f, an installer, ...).
 static void cleanup(void)
 {
-    Shell_NotifyIconW(NIM_DELETE, &nid);
+    // Clear hwnd first, so wnd_proc() ignores clicks that come in while
+    // Shell_NotifyIconW waits for Explorer.
     hwnd = NULL;
+    Shell_NotifyIconW(NIM_DELETE, &nid);
     update_pending = 0;
     if (menu_open) {
         EndMenu();                   // show_menu() frees the menu when it returns
@@ -145,17 +149,23 @@ static void cleanup(void)
 
 static LRESULT CALLBACK wnd_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if (!hwnd)                       // still in CreateWindowW, or closing
+        return DefWindowProcW(w, msg, wp, lp);
     if (msg == WM_TRAY) {
+        // A double-click gives DOWN, UP, DBLCLK, UP: skip the second UP. Timing
+        // the clicks doesn't work if cb opens a dialog or takes a while.
+        static int dblclk;
         UINT event = LOWORD(lp);
-        if (event == WM_LBUTTONUP && g_tray->cb) {
-            static DWORD last;       // a double-click gives two WM_LBUTTONUPs, skip the 2nd
-            DWORD now = GetTickCount();
-            if (now - last > GetDoubleClickTime())
-                g_tray->cb(g_tray);
-            last = now;
-        } else if (event == WM_LBUTTONUP || event == WM_RBUTTONUP) {
+        if (event == WM_LBUTTONDOWN)
+            dblclk = 0;
+        else if (event == WM_LBUTTONDBLCLK)
+            dblclk = 1;
+        else if (event == WM_LBUTTONUP && dblclk)
+            dblclk = 0;
+        else if (event == WM_LBUTTONUP && g_tray->cb)
+            g_tray->cb(g_tray);
+        else if (event == WM_LBUTTONUP || event == WM_RBUTTONUP)
             show_menu();
-        }
         return 0;
     }
     if (msg == WM_TIMER && wp == RETRY_TIMER) {
