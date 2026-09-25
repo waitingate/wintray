@@ -37,7 +37,8 @@ g++ -Os -s -mwindows -static -o app.exe app.cpp wintray.o res.o -luser32 -lshell
 ```
 
 With other compilers, add `wintray.c` to your project and link `user32` and
-`shell32`. I haven't tried MSVC yet.
+`shell32`. I haven't tried MSVC yet. Without the C runtime, compile with `/GS-`:
+MSVC's default stack checks call into the runtime.
 
 ## API
 
@@ -61,13 +62,14 @@ struct wintray_menu_item {
 int  wintray_init(struct wintray *tray);    // 0 on success, -1 on error or if already running
 int  wintray_loop(int blocking);            // returns -1 once the tray has been closed
 void wintray_update(struct wintray *tray);  // call after changing the icon, tooltip or menu
-void wintray_exit(void);
+void wintray_exit(void);                    // removes the icon and posts WM_QUIT
 struct wintray *wintray_get_instance(void);
 ```
 
 ## Notes
 
-- Strings are UTF-8.
+- Strings are UTF-8. Write `&&` for a `&` in menu text (a single `&` marks the
+  shortcut key).
 - For the icon, use `icon_id` (a resource in your .rc file) or `icon_filepath`.
   Give an absolute path: the working directory isn't always the exe's folder.
 - Call all functions from the thread that called `wintray_init()`. For periodic
@@ -79,6 +81,11 @@ struct wintray *wintray_get_instance(void);
 - If Explorer restarts, the icon is added again automatically.
 - If `cb` is set, a left click calls it (once per double-click) and a right
   click opens the menu. Otherwise both open the menu.
+- `wintray_exit()` posts `WM_QUIT`, which stops every message loop on the
+  thread. A `MessageBox` shown after it in the same callback closes right away.
+  To show the icon again, call `wintray_init()` once `wintray_loop()` has
+  returned -1. `wintray_loop()` also returns -1 on a `WM_QUIT` from your own
+  code, but the icon stays until you call `wintray_exit()`.
 
 ## Limits
 
@@ -87,9 +94,15 @@ characters per menu item and 127 for the tooltip. Windows 7 or later.
 
 ## Coming from zserge/tray or dmikushin/tray
 
-The API is the same apart from the names: replace `tray_` with `wintray_` and
-`struct tray` with `struct wintray`. Strings are UTF-8 instead of the ANSI code
-page, and `struct wintray` has an extra `icon_id` field at the end.
+Replace `tray_` with `wintray_` and `struct tray` with `struct wintray`.
+Strings are UTF-8 instead of the ANSI code page, `icon_filepath` has to be an
+.ico file (the originals use `ExtractIconEx`, which also takes an .exe or
+.dll), and `struct wintray` has an extra `icon_id` field at the end.
+
+zserge/tray needs a few more changes: `icon` is now `icon_filepath`,
+`struct tray_menu` is now `struct wintray_menu_item` (without the `context`
+field), and `struct wintray` has `tooltip` and `cb` before `menu`, so check
+your initializers.
 
 ## Testing
 
