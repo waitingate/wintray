@@ -9,8 +9,8 @@
 #define ID_FIRST    1000             // first menu command ID
 #define MAX_ITEMS   256
 #define MAX_DEPTH   8                // max submenu nesting
-#define MAX_MENUS   64               // submenus in total, so a menu that contains
-                                     // itself can't create thousands of them
+#define MAX_MENUS   64               // max submenus in total, in case a menu
+                                     // contains itself
 #define RETRY_TIMER 1
 
 static struct wintray *g_tray;
@@ -75,7 +75,8 @@ static HMENU build_menu(struct wintray_menu_item *m, int depth)
     return menu;
 }
 
-// The module this code is in: the exe, or a DLL if wintray is built into one.
+// Returns the exe or DLL this file is compiled into. GetModuleHandleW(NULL)
+// always gives the exe.
 static HINSTANCE this_module(void)
 {
     HMODULE m = NULL;
@@ -210,8 +211,8 @@ int wintray_init(struct wintray *tray)
     wc.lpfnWndProc   = wnd_proc;
     wc.hInstance     = this_module();
     wc.lpszClassName = L"WintrayWindow";
-    // Register the class fresh: after a DLL is unloaded and loaded again, the
-    // old registration still points to the old wnd_proc.
+    // A reloaded DLL can still have its old class, with a wnd_proc that's
+    // gone, so remove it before registering.
     UnregisterClassW(wc.lpszClassName, wc.hInstance);
     if (!RegisterClassW(&wc))
         return -1;
