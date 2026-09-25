@@ -89,8 +89,8 @@ struct wintray *wintray_get_instance(void);
 
 ## Limits
 
-One icon per process, up to 256 menu items and 8 levels of submenus, 255
-characters per menu item and 127 for the tooltip. Windows 7 or later.
+One icon per process, up to 256 menu items and 64 submenus (8 levels deep),
+255 characters per menu item and 127 for the tooltip. Windows 7 or later.
 
 ## Coming from zserge/tray or dmikushin/tray
 

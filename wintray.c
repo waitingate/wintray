@@ -8,8 +8,9 @@
 #define WM_TRAY     (WM_APP + 1)     // notification icon callback message
 #define ID_FIRST    1000             // first menu command ID
 #define MAX_ITEMS   256
-#define MAX_DEPTH   8                // max submenu nesting, also guards against
-                                     // a menu that contains itself
+#define MAX_DEPTH   8                // max submenu nesting
+#define MAX_MENUS   64               // submenus in total, so a menu that contains
+                                     // itself can't create thousands of them
 #define RETRY_TIMER 1
 
 static struct wintray *g_tray;
@@ -22,6 +23,7 @@ static int   update_pending;         // wintray_update() was called while the me
 static UINT  wm_taskbar_created;
 static struct wintray_menu_item *items[MAX_ITEMS];  // indexed by command ID - ID_FIRST
 static UINT  item_count;
+static UINT  menu_count;
 
 // Converts UTF-8 to UTF-16. Text that doesn't fit is cut at a character
 // boundary; out is always null-terminated.
@@ -44,7 +46,7 @@ static void to_wide(const char *s, wchar_t *out, int size)
             out[n] = 0;
             return;
         }
-        bytes--;
+        bytes -= need - (size - 1);  // a UTF-16 unit takes at least one byte
     }
 }
 
@@ -60,7 +62,8 @@ static HMENU build_menu(struct wintray_menu_item *m, int depth)
         to_wide(m->text, text, 256);
         UINT flags = MF_STRING | (m->disabled ? MF_GRAYED : 0) | (m->checked ? MF_CHECKED : 0);
         if (m->submenu) {
-            if (depth < MAX_DEPTH) {
+            if (depth < MAX_DEPTH && menu_count < MAX_MENUS) {
+                menu_count++;
                 HMENU sub = build_menu(m->submenu, depth + 1);
                 AppendMenuW(menu, flags | MF_POPUP, (UINT_PTR)sub, text);
             }
@@ -72,12 +75,21 @@ static HMENU build_menu(struct wintray_menu_item *m, int depth)
     return menu;
 }
 
+// The module this code is in: the exe, or a DLL if wintray is built into one.
+static HINSTANCE this_module(void)
+{
+    HMODULE m = NULL;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)&g_tray, &m);
+    return m;
+}
+
 static HICON load_icon(const struct wintray *t)
 {
     int cx = GetSystemMetrics(SM_CXSMICON), cy = GetSystemMetrics(SM_CYSMICON);
     HICON h = NULL;
     if (t->icon_id) {
-        h = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(t->icon_id),
+        h = (HICON)LoadImageW(this_module(), MAKEINTRESOURCEW(t->icon_id),
                               IMAGE_ICON, cx, cy, 0);
     } else if (t->icon_filepath) {
         wchar_t path[MAX_PATH];
@@ -196,10 +208,13 @@ int wintray_init(struct wintray *tray)
     // those don't receive broadcasts such as TaskbarCreated.
     WNDCLASSW wc = {0};
     wc.lpfnWndProc   = wnd_proc;
-    wc.hInstance     = GetModuleHandleW(NULL);
+    wc.hInstance     = this_module();
     wc.lpszClassName = L"WintrayWindow";
-    if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
-        return -1;                   // already registered is fine (init after exit)
+    // Register the class fresh: after a DLL is unloaded and loaded again, the
+    // old registration still points to the old wnd_proc.
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
+    if (!RegisterClassW(&wc))
+        return -1;
     hwnd = CreateWindowW(wc.lpszClassName, L"", 0, 0, 0, 0, 0, NULL, NULL, wc.hInstance, NULL);
     if (!hwnd)
         return -1;
@@ -246,6 +261,7 @@ void wintray_update(struct wintray *tray)
     if (hmenu)
         DestroyMenu(hmenu);          // destroys the submenus too
     item_count = 0;
+    menu_count = 0;
     hmenu = build_menu(tray->menu, 0);
 
     HICON old = nid.hIcon;
