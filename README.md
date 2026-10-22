@@ -3,11 +3,17 @@
 A small C library that puts an icon in the Windows notification area (the
 tray next to the clock), with a tooltip and a right-click menu.
 
+![A wintray menu with a grayed-out title, check marks, a submenu and separator lines](docs/menu.png)
+
 - Two files: add `wintray.h` and `wintray.c` to your program.
 - Menus can have check marks, grayed-out items, separator lines and submenus.
 - All text is UTF-8, so any language works.
 - Only the Win32 API: no other libraries, not even the C runtime. It works in
   an exe or a DLL, on Windows 7 and later.
+
+On this page: [Quick start](#quick-start), [Your own icon](#your-own-icon),
+[Examples](#examples), [API](#api), [Good to know](#good-to-know),
+[Limits](#limits).
 
 ## Quick start
 
@@ -81,6 +87,8 @@ folder.
 Each example is a complete program; build it like the quick start.
 
 ### Check marks, submenus and separators
+
+This is the menu in the picture at the top, after choosing Paused.
 
 ```c
 #include "wintray.h"
