@@ -20,8 +20,10 @@
 // The library keeps pointers to the wintray struct and the menu arrays, so they
 // must stay valid while the icon exists (static or global).
 //
-// wintray_update() does nothing before wintray_init() and after wintray_exit(),
-// so code that fills in the tooltip and menu may run before the icon is shown.
+// wintray_update() does nothing while there is no icon window: before
+// wintray_init(), and after wintray_exit() or the window being closed, until the
+// next wintray_init(). So code that fills in the tooltip and menu may run before
+// the icon is shown, on the thread that will call wintray_init().
 //
 // Limits: one icon per process, 256 menu items, 256 submenus, 8 submenu levels,
 // 255 characters per menu item and 127 for the tooltip (longer text is cut at a
@@ -54,7 +56,7 @@ struct wintray_menu_item {
     struct wintray_menu_item *submenu;  // NULL, or an array like the main menu
 };
 
-struct wintray *wintray_get_instance(void);
+struct wintray *wintray_get_instance(void); // the struct the icon last used; NULL before the first init
 
 int  wintray_init(struct wintray *tray);    // 0 on success, -1 on error or if already running
 int  wintray_loop(int blocking);            // returns -1 once the tray has been closed

@@ -469,6 +469,22 @@ static void closed_at(int line, int blocking)
 }
 #define closed() closed_at(__LINE__, 0)
 #define stop() (wintray_exit(), closed())
+
+// Without an icon window, wintray_update() must do nothing at all: no menu, no
+// icon, no Shell_NotifyIconW call, and wintray_get_instance() stays as it was.
+static void update_without_window_at(int line)
+{
+    static struct wintray other = {NULL, "other", NULL, menu1, 1};
+    struct wintray *instance = wintray_get_instance();
+    int before = fails, menus = menus_created, icons = icons_created;
+    ghosts = 0;
+    wintray_update(&other);
+    CHECK(menus_created == menus && icons_created == icons && ghosts == 0);
+    CHECK(wintray_get_instance() == instance);
+    if (fails > before)
+        printf("    called from line %d\n", line);
+}
+#define update_without_window() update_without_window_at(__LINE__)
 static void ev(UINT e) { wnd_proc(W, WM_TRAY, 1, e); }
 static void left_click(void) { ev(WM_LBUTTONDOWN); ev(WM_LBUTTONUP); }
 static void second_click(void) { ev(WM_LBUTTONDBLCLK); ev(WM_LBUTTONUP); }
@@ -477,6 +493,7 @@ static void right_click(void) { ev(WM_RBUTTONDOWN); ev(WM_RBUTTONUP); }
 static void test_clicks(void)
 {
     printf("clicks\n");
+    update_without_window();                        // before the first wintray_init()
     start(&t_cb);
     cb_calls = 0; left_click();
     CHECK(cb_calls == 1);                           // single click
@@ -551,13 +568,12 @@ static void test_closing(void)
     notify_on = NIM_DELETE; notify_hook = on_delete;   // clicks while the icon is being removed
     stop();
     CHECK(cb_calls == 0 && track_calls == 0 && ghosts == 0);
+    update_without_window();                        // after wintray_exit()
 
     start(&t_menu);                                 // closed from outside
     DestroyWindow(W);
     closed();
-    int menus = menus_created, icons = icons_created;
-    wintray_update(&t_menu);                        // without a window: does nothing
-    CHECK(menus_created == menus && icons_created == icons && !icon_present && hwnd == NULL);
+    update_without_window();                        // after the window was closed
     CHECK(find_class(CLASS_NAME, this_module()) != NULL);   // class still registered
     start(&t_menu);                                 // init works again
     stop();

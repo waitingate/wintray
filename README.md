@@ -289,7 +289,7 @@ int  wintray_init(struct wintray *tray);    // 0 on success, -1 on error or if a
 int  wintray_loop(int blocking);            // returns -1 once the tray has been closed
 void wintray_update(struct wintray *tray);  // call after changing the icon, tooltip or menu
 void wintray_exit(void);                    // removes the icon and posts WM_QUIT
-struct wintray *wintray_get_instance(void); // the struct last passed to init or update
+struct wintray *wintray_get_instance(void); // the struct the icon last used; NULL before the first init
 ```
 
 ## Good to know
@@ -298,9 +298,11 @@ struct wintray *wintray_get_instance(void); // the struct last passed to init or
   make them static or global, not local variables.
 - In menu text, `&` underlines the next letter as a shortcut key. Write `&&`
   for a real `&`.
-- `wintray_update()` does nothing before `wintray_init()` and after
-  `wintray_exit()`, so code that fills in the tooltip and menu may run before
-  the icon is shown.
+- `wintray_update()` does nothing while there is no icon window: before
+  `wintray_init()`, and after `wintray_exit()` or the window being closed,
+  until the next `wintray_init()`. So code that fills in the tooltip and menu
+  may run before the icon is shown, on the thread that will call
+  `wintray_init()`.
 - If Explorer restarts, the icon comes back on its own.
 - `wintray_exit()` posts `WM_QUIT`, which ends every message loop on the
   thread: a `MessageBox` shown after it in the same callback closes at once.
