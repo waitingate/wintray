@@ -114,6 +114,15 @@ Wine.
 
 On Linux, `sh test/run.sh` tests the library against fake Win32 functions,
 including clicks at awkward moments. GitHub Actions runs it on every push.
+The same tests also build on Windows with MinGW, without AddressSanitizer:
+
+```
+gcc -std=gnu11 -fshort-wchar -I test test/test.c -o logic-test.exe
+.\logic-test.exe exe
+.\logic-test.exe dll
+.\logic-test.exe gmhfail
+```
+
 Before a release, also check by hand that a double-click calls `cb` once, a
 fast double right-click opens one menu, and the icon from `icon_id` shows.
 
