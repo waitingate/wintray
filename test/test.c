@@ -198,9 +198,10 @@ int GetSystemMetrics(int i) { (void)i; return 16; }
 struct cls { int used; LPCWSTR name; HINSTANCE inst; WNDPROC proc; int windows; };
 static struct cls classes[8];
 static int wsame(LPCWSTR a, LPCWSTR b) { while (*a && *a == *b) a++, b++; return *a == *b; }
+static int wlen(LPCWSTR s) { int n = 0; while (s[n]) n++; return n; }
 static struct cls *find_class(LPCWSTR name, HINSTANCE inst)
 {
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < (int)ARRAYSIZE(classes); i++)
         if (classes[i].used && classes[i].inst == inst && wsame(classes[i].name, name))
             return &classes[i];
     return NULL;
@@ -209,7 +210,7 @@ unsigned short RegisterClassW(const WNDCLASSW *wc)
 {
     if (find_class(wc->lpszClassName, wc->hInstance))
         return 0;                           // ERROR_CLASS_ALREADY_EXISTS
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < (int)ARRAYSIZE(classes); i++)
         if (!classes[i].used) {
             classes[i] = (struct cls){1, wc->lpszClassName, wc->hInstance, wc->lpfnWndProc, 0};
             return (unsigned short)(i + 1);
@@ -224,7 +225,7 @@ BOOL UnregisterClassW(LPCWSTR name, HINSTANCE inst)
     c->used = 0;
     return TRUE;
 }
-struct win { int state; struct cls *c; };  // 1 alive, 2 being destroyed, 0 gone
+struct win { int alive; struct cls *c; };  // alive until DestroyWindow starts
 static struct win wins[1000];
 static int nwins;
 #define WIN(h) wins[(uintptr_t)(h) / 16]
@@ -244,28 +245,28 @@ HWND CreateWindowW(LPCWSTR cls, LPCWSTR title, DWORD st, int x, int y, int w, in
 }
 BOOL DestroyWindow(HWND hw)
 {
-    if (WIN(hw).state != 1)
+    if (!WIN(hw).alive)
         return FALSE;
-    WIN(hw).state = 2;
+    WIN(hw).alive = 0;
     WIN(hw).c->proc(hw, WM_DESTROY, 0, 0);
     WIN(hw).c->proc(hw, 0x0082, 0, 0);      // WM_NCDESTROY
-    WIN(hw).state = 0;
     WIN(hw).c->windows--;
     return TRUE;
 }
 
 /* ---------------- Explorer ---------------- */
 static int explorer_up = 1, icon_present, ghosts;
-static void (*notify_hook)(DWORD);
+static DWORD notify_on;                     // the call during which notify_hook runs
+static void (*notify_hook)(void);
 BOOL Shell_NotifyIconW(DWORD m, NOTIFYICONDATAW *d)
 {
-    if (notify_hook)
-        notify_hook(m);                     // messages handled while it waits for Explorer
+    if (m == notify_on)
+        run_hook(&notify_hook);             // messages handled while it waits for Explorer
     if (m == NIM_DELETE) {
         icon_present = 0;
         return TRUE;
     }
-    if (WIN(d->hWnd).state != 1)
+    if (!WIN(d->hWnd).alive)
         ghosts++;                           // icon added or changed for a closing window
     if (!explorer_up)
         return FALSE;
@@ -380,7 +381,7 @@ static void test_to_wide(void)
     srand(1);
     for (int it = 0; it < 101000; it++) {           // valid UTF-8, all character sizes
         int bigcase = it >= 100000;
-        int size = bigcase ? big[rand() % 3] : small[rand() % 9];
+        int size = bigcase ? big[rand() % ARRAYSIZE(big)] : small[rand() % ARRAYSIZE(small)];
         int target = rand() % ((bigcase ? 1200 : 120) + 1), len = 0;
         while (len < target)
             len += put_utf8(rand_cp(), s + len);
@@ -390,17 +391,14 @@ static void test_to_wide(void)
         bad_ref += !wsame(a, r);
     }
     for (int it = 0; it < 50000; it++) {            // random bytes, mostly not valid UTF-8
-        int size = small[rand() % 9], len = rand() % 150;
+        int size = small[rand() % ARRAYSIZE(small)], len = rand() % 150;
         for (int i = 0; i < len; i++)
             s[i] = (char)(1 + rand() % 255);
         s[len] = 0;
         to_wide(s, a, size);
         to_wide_bytewise(s, b, size);
         bad_inv += !wsame(a, b);
-        int n = 0;
-        while (a[n])
-            n++;
-        overlong += n > size - 1;
+        overlong += wlen(a) > size - 1;
     }
     CHECK(bad_ref == 0);
     CHECK(bad_inv == 0);
@@ -418,10 +416,7 @@ static void test_to_wide(void)
     memset(s + 3, 0x80, 200);
     s[203] = 0;
     to_wide(s, a, 128);
-    int units = 0;
-    while (a[units])
-        units++;
-    CHECK(units == 127);                            // the cut stays among the stray bytes, each one U+FFFD
+    CHECK(wlen(a) == 127);                          // the cut stays among the stray bytes, each one U+FFFD
 }
 
 /* ---------------- tray tests ---------------- */
@@ -456,9 +451,9 @@ static void closed_at(int line, int blocking)
     CHECK(wintray_loop(blocking) == -1 && quit_posted == 0);   // the loop takes the WM_QUIT
     CHECK(hwnd == NULL && menus_live == 0 && icons_live == 0 && !icon_present && !update_pending);
     CHECK(!track_hook && !cb_hook && !item_hook && !notify_hook);   // every hook ran
-    quit_posted = 0;                                // a failure here must not fail later tests too
-    track_hook = cb_hook = item_hook = NULL;
-    notify_hook = NULL;
+    CHECK(thread_timers == 0);                      // no SetTimer(NULL, ...)
+    quit_posted = thread_timers = 0;                // a failure here must not fail later tests too
+    track_hook = cb_hook = item_hook = notify_hook = NULL;
     if (fails > before)
         printf("    called from line %d\n", line);
 }
@@ -533,11 +528,8 @@ static void test_menu(void)
     track_ret = 0;
 }
 
-static void on_delete(DWORD m)
+static void on_delete(void)
 {
-    if (m != NIM_DELETE)
-        return;
-    notify_hook = NULL;
     left_click(); right_click();
     wnd_proc(W, TASKBAR_CREATED, 0, 0);
 }
@@ -546,7 +538,7 @@ static void test_closing(void)
     printf("closing\n");
     start(&t_cb);
     cb_calls = track_calls = ghosts = 0;
-    notify_hook = on_delete;                        // clicks while the icon is being removed
+    notify_on = NIM_DELETE; notify_hook = on_delete;   // clicks while the icon is being removed
     stop();
     CHECK(cb_calls == 0 && track_calls == 0 && ghosts == 0);
 
@@ -600,14 +592,7 @@ static void test_icons(void)
     CHECK(this_module() == (mode_dll ? DLL : EXE));
 }
 
-static DWORD close_on;                              // the Shell_NotifyIconW call to close during
-static void close_during(DWORD m)
-{
-    if (m != close_on)
-        return;
-    notify_hook = NULL;
-    DestroyWindow(W);
-}
+static void close_window(void) { DestroyWindow(W); }
 static void test_explorer(void)
 {
     printf("explorer\n");
@@ -625,19 +610,16 @@ static void test_explorer(void)
     // Closed while Shell_NotifyIconW waits for Explorer: no icon may be left for the
     // closed window, and no SetTimer(NULL, ...). Without an icon, NIM_MODIFY fails
     // and NIM_ADD comes next; with Explorer down, NIM_ADD fails too.
-    static const struct { DWORD call; int icon, up; } cases[] = {
-        {NIM_MODIFY, 1, 1}, {NIM_ADD, 0, 1}, {NIM_ADD, 0, 0}};
-    for (int i = 0; i < 3; i++) {
+    static const struct { DWORD call; int up; } cases[] = {{NIM_MODIFY, 1}, {NIM_ADD, 1}, {NIM_ADD, 0}};
+    for (int i = 0; i < (int)ARRAYSIZE(cases); i++) {
         int before = fails;
         start(&t_menu);
-        icon_present = cases[i].icon;
+        icon_present = cases[i].call == NIM_MODIFY;
         explorer_up = cases[i].up;
-        close_on = cases[i].call;
-        notify_hook = close_during;
+        notify_on = cases[i].call; notify_hook = close_window;
         wnd_proc(W, TASKBAR_CREATED, 0, 0);
         explorer_up = 1;
         closed();
-        CHECK(thread_timers == 0);
         if (fails > before)
             printf("    in case %d\n", i);
     }
@@ -713,7 +695,6 @@ int main(int argc, char **argv)
     test_explorer();
     test_loop();
     test_limits();
-    CHECK(thread_timers == 0);
     printf(fails ? "%d FAILED\n" : "all passed\n", fails);
     return fails != 0;
 }
