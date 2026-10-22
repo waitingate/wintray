@@ -59,25 +59,34 @@ static void put_utf16(unsigned c, wchar_t *p)
     p[1] = (wchar_t)(0xDC00 + ((c - 0x10000) & 0x3FF));
 }
 
+// Converts whole characters while they fit in max units; out can be NULL.
+// Returns the units, and the bytes converted in *used.
+static int utf8_to_16(const char *src, int n, wchar_t *out, int max, int *used)
+{
+    const unsigned char *s = (const unsigned char *)src;
+    int units = 0, i = 0;
+    while (i < n) {
+        unsigned c;
+        int k = dec(s, n, i, &c), u = c >= 0x10000 ? 2 : 1;
+        if (units + u > max)
+            break;
+        if (out)
+            put_utf16(c, out + units);
+        units += u;
+        i += k;
+    }
+    *used = i;
+    return units;
+}
+
 static long mb_calls;
 int MultiByteToWideChar(UINT cp, DWORD fl, LPCSTR src, int n, wchar_t *out, int outn)
 {
     (void)cp; (void)fl;
     mb_calls++;
-    const unsigned char *s = (const unsigned char *)src;
-    int units = 0;
-    for (int i = 0; i < n;) {
-        unsigned c;
-        int k = dec(s, n, i, &c), u = c >= 0x10000 ? 2 : 1;
-        if (out) {
-            if (units + u > outn)
-                return 0;
-            put_utf16(c, out + units);
-        }
-        units += u;
-        i += k;
-    }
-    return units;
+    // Without out, n is enough: no character gives more units than bytes.
+    int used, units = utf8_to_16(src, n, out, out ? outn : n, &used);
+    return used < n ? 0 : units;            // 0 when the buffer is too small
 }
 
 /* ---------------- menus ---------------- */
@@ -284,7 +293,8 @@ BOOL SetForegroundWindow(HWND h) { (void)h; return TRUE; }
 BOOL PostMessageW(HWND h, UINT m, WPARAM w, LPARAM l) { (void)h; (void)m; (void)w; (void)l; return TRUE; }
 void PostQuitMessage(int c) { (void)c; quit_posted++; }
 LRESULT DefWindowProcW(HWND h, UINT m, WPARAM w, LPARAM l) { (void)h; (void)m; (void)w; (void)l; return 0; }
-UINT RegisterWindowMessageW(LPCWSTR n) { (void)n; return 0xC100; }
+#define TASKBAR_CREATED 0xC100
+UINT RegisterWindowMessageW(LPCWSTR n) { return wsame(n, L"TaskbarCreated") ? TASKBAR_CREATED : 0xC101; }
 BOOL ChangeWindowMessageFilterEx(HWND h, UINT m, DWORD a, void *p) { (void)h; (void)m; (void)a; (void)p; return TRUE; }
 BOOL GetMessageW(MSG *m, HWND h, UINT a, UINT b)
 {
@@ -328,17 +338,8 @@ static void to_wide_old(const char *s, wchar_t *out, int size)
 // Expected result for valid UTF-8: the longest run of whole characters that fits.
 static void ref_conv(const char *s, int size, wchar_t *out)
 {
-    int n = (int)strlen(s), units = 0;
-    for (int i = 0; i < n;) {
-        unsigned c;
-        int k = dec((const unsigned char *)s, n, i, &c), u = c >= 0x10000 ? 2 : 1;
-        if (units + u > size - 1)
-            break;
-        put_utf16(c, out + units);
-        units += u;
-        i += k;
-    }
-    out[units] = 0;
+    int used;
+    out[utf8_to_16(s, (int)strlen(s), out, size - 1, &used)] = 0;
 }
 static int put_utf8(unsigned c, char *p)
 {
@@ -434,7 +435,8 @@ static void closed(void)
 {
     CHECK(quit_posted == 1);
     CHECK(wintray_loop(0) == -1);                   // the loop sees WM_QUIT
-    CHECK(hwnd == NULL && menus_live == 0 && icons_live == 0 && !icon_present);
+    quit_posted = 0;                                // an extra one must not fail later tests too
+    CHECK(hwnd == NULL && menus_live == 0 && icons_live == 0 && !icon_present && !update_pending);
 }
 static void stop(void) { wintray_exit(); closed(); }
 static void ev(UINT e) { wnd_proc(W, WM_TRAY, 1, e); }
@@ -484,23 +486,24 @@ static void test_menu(void)
 {
     printf("menu\n");
     start(&t_menu);
-    track_calls = 0; track_hook = right_click; ev(WM_RBUTTONUP);
+    track_calls = 0; track_hook = right_click; right_click();
     CHECK(track_calls == 1 && menu_open == 0);      // clicked again while the menu is open
     int before = menus_created;
-    track_hook = hook_update; ev(WM_RBUTTONUP);
+    track_hook = hook_update; right_click();
     CHECK(menus_created > before && update_pending == 0);   // rebuilt once it closed
     before = menus_created;
     track_hook = hook_update; track_ret = ID_FIRST; item_hook = do_update; item_calls = 0;
-    ev(WM_RBUTTONUP);
+    right_click();
     CHECK(item_calls == 1 && update_pending == 0);  // item cb updates, plus a pending update
     CHECK(menus_created == before + 1);             // rebuilt once, not twice
     track_ret = 0;
-    track_hook = hook_exit; ev(WM_RBUTTONUP);       // wintray_exit() while the menu is open
+    track_hook = hook_exit; right_click();          // wintray_exit() while the menu is open
     closed();
     CHECK(hmenu == NULL);
 
-    start(&t_menu);                                 // the "Exit" item
-    track_ret = ID_FIRST + 1; item_hook = do_exit; item_calls = 0; ev(WM_RBUTTONUP);
+    start(&t_menu);                                 // the "Exit" item, with an update waiting
+    track_hook = hook_update; track_ret = ID_FIRST + 1; item_hook = do_exit; item_calls = 0;
+    right_click();
     CHECK(item_calls == 1);
     closed();
     track_ret = 0;
@@ -510,8 +513,8 @@ static void on_delete(DWORD m)
 {
     if (m != NIM_DELETE)
         return;
-    left_click(); ev(WM_RBUTTONUP);
-    wnd_proc(W, wm_taskbar_created, 0, 0);
+    left_click(); right_click();
+    wnd_proc(W, TASKBAR_CREATED, 0, 0);
 }
 static void test_closing(void)
 {
@@ -537,7 +540,8 @@ static void test_closing(void)
     old.lpszClassName = CLASS_NAME;
     CHECK(RegisterClassW(&old) != 0);
     start(&t_menu);
-    CHECK(find_class(CLASS_NAME, mode_dll ? DLL : EXE)->proc == wnd_proc);
+    struct cls *c = find_class(CLASS_NAME, mode_dll ? DLL : EXE);
+    CHECK(c && c->proc == wnd_proc);
     CHECK(wintray_init(&t_menu) == -1);             // already running
     stop();
     CHECK(wintray_init(NULL) == -1);
@@ -572,6 +576,13 @@ static void test_icons(void)
     CHECK(this_module() == (mode_dll ? DLL : EXE));
 }
 
+static void close_on_modify(DWORD m)
+{
+    if (m != NIM_MODIFY)
+        return;
+    notify_hook = NULL;
+    DestroyWindow(W);
+}
 static void test_explorer(void)
 {
     printf("explorer\n");
@@ -582,9 +593,19 @@ static void test_explorer(void)
     wnd_proc(W, WM_TIMER, RETRY_TIMER, 0);
     CHECK(icon_present && !retry_timer_on);         // added on retry
     icon_present = 0;
-    wnd_proc(W, wm_taskbar_created, 0, 0);
+    wnd_proc(W, TASKBAR_CREATED, 0, 0);
     CHECK(icon_present);                            // re-added after an Explorer restart
     stop();
+
+    for (int up = 1; up >= 0; up--) {               // closed while NIM_MODIFY waits for Explorer
+        start(&t_menu);
+        explorer_up = up;
+        notify_hook = close_on_modify;
+        wnd_proc(W, TASKBAR_CREATED, 0, 0);
+        explorer_up = 1;
+        closed();                                   // no icon added back for the closed window
+        CHECK(thread_timers == 0);                  // and no SetTimer(NULL, ...)
+    }
 }
 
 static struct wintray_menu_item selfm[5], top[71], subs[70][4], many[301];

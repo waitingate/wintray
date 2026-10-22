@@ -119,9 +119,16 @@ static HICON load_icon(const struct wintray *t)
 // NIM_MODIFY fails when Explorer doesn't know the icon (first call, or after
 // an Explorer restart), so fall back to NIM_ADD. If that fails too, Explorer
 // is probably busy (e.g. right after login): retry every 2 seconds.
+// The window can close while Shell_NotifyIconW waits, so check hwnd after
+// each call: no icon for a closed window, and no SetTimer(NULL, ...).
 static void show_icon(void)
 {
-    if (Shell_NotifyIconW(NIM_MODIFY, &nid) || Shell_NotifyIconW(NIM_ADD, &nid))
+    int ok = Shell_NotifyIconW(NIM_MODIFY, &nid);
+    if (!ok && hwnd)
+        ok = Shell_NotifyIconW(NIM_ADD, &nid);
+    if (!hwnd)
+        return;
+    if (ok)
         KillTimer(hwnd, RETRY_TIMER);
     else
         SetTimer(hwnd, RETRY_TIMER, 2000, NULL);
@@ -161,6 +168,7 @@ static void cleanup(void)
     // Shell_NotifyIconW waits for Explorer.
     hwnd = NULL;
     Shell_NotifyIconW(NIM_DELETE, &nid);
+    update_pending = 0;
     if (menu_open) {
         EndMenu();                   // show_menu() frees the menu when it returns
     } else if (hmenu) {
