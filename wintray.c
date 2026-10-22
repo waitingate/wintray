@@ -29,6 +29,24 @@ static struct wintray_menu_item *items[MAX_ITEMS];  // indexed by command ID - I
 static UINT  item_count;
 static UINT  menu_count;
 
+// Length of the valid UTF-8 character that starts at s, or 0 if none does.
+static int utf8_len(const char *s)
+{
+    const unsigned char *u = (const unsigned char *)s;
+    unsigned c = u[0];
+    int n = c < 0x80 ? 1 : c < 0xC2 ? 0 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : c < 0xF5 ? 4 : 0;
+    // Second bytes outside lo..hi would give an overlong form, a surrogate or
+    // more than U+10FFFF.
+    unsigned lo = c == 0xE0 ? 0xA0 : c == 0xF0 ? 0x90 : 0x80;
+    unsigned hi = c == 0xED ? 0x9F : c == 0xF4 ? 0x8F : 0xBF;
+    if (n > 1 && (u[1] < lo || u[1] > hi))
+        return 0;
+    for (int i = 2; i < n; i++)
+        if ((u[i] & 0xC0) != 0x80)
+            return 0;
+    return n;
+}
+
 // Converts UTF-8 to UTF-16. Text that doesn't fit is cut at a character
 // boundary; out is always null-terminated.
 //
@@ -44,14 +62,13 @@ static void to_wide(const char *s, wchar_t *out, int size)
     if (bytes > 3 * (size - 1))
         bytes = 3 * (size - 1);
     for (;;) {
-        // Don't split a multi-byte character: its first byte is at most 3
-        // back. Further back are stray bytes of invalid text, which convert
-        // one by one, so the cut can stay.
+        // Don't cut inside a character: if a valid one starts up to 3 bytes
+        // back and runs past the cut, cut before it. Bytes of invalid text
+        // belong to no character, so a cut among them can stay.
         int cut = bytes;
-        while (bytes > 0 && cut - bytes < 3 && (s[bytes] & 0xC0) == 0x80)
-            bytes--;
-        if ((s[bytes] & 0xC0) == 0x80)
-            bytes = cut;
+        for (int k = 1; k <= 3 && k <= cut; k++)
+            if (utf8_len(s + cut - k) > k)
+                bytes = cut - k;
         if (!bytes)
             return;
         // What MultiByteToWideChar does with a buffer that is too small differs
@@ -136,7 +153,9 @@ static void show_icon(void)
     int ok = Shell_NotifyIconW(NIM_MODIFY, &nid);
     if (!ok && hwnd) {
         ok = Shell_NotifyIconW(NIM_ADD, &nid);
-        if (ok && !hwnd)             // in case Explorer added it after cleanup()'s NIM_DELETE
+        // Closed meanwhile: Explorer may still add the icon after cleanup()'s
+        // NIM_DELETE, even when NIM_ADD reported a timeout.
+        if (!hwnd)
             Shell_NotifyIconW(NIM_DELETE, &nid);
     }
     if (!hwnd)

@@ -33,22 +33,38 @@ BOOL GetModuleHandleExW(DWORD f, LPCWSTR a, HMODULE *m)
 /* ---------------- strings ---------------- */
 int lstrlenA(LPCSTR s) { return s ? (int)strlen(s) : 0; }
 
-// Strict UTF-8 decoder. An invalid byte becomes U+FFFD and uses one byte.
+// Whether a valid code point of a k-byte sequence starts with the bits in v,
+// which come from its first j bytes.
+static int can_start(unsigned v, int j, int k, unsigned min)
+{
+    int shift = 6 * (k - j);
+    unsigned lo = v << shift, hi = lo + (1u << shift) - 1;
+    return hi >= min && lo <= 0x10FFFF && !(lo >= 0xD800 && hi <= 0xDFFF);
+}
+
+// Strict UTF-8 decoder. A broken or cut-off sequence becomes one U+FFFD for the
+// longest start of it that a character could have (at least one byte), as
+// Windows does with a cut-off character; a stray byte becomes one of its own.
 static int dec(const unsigned char *s, int n, int i, unsigned *cp)
 {
     unsigned c = s[i], min;
     int k;
     if (c < 0x80) { *cp = c; return 1; }
+    *cp = 0xFFFD;
     if ((c & 0xE0) == 0xC0)      { k = 2; min = 0x80;    c &= 0x1F; }
     else if ((c & 0xF0) == 0xE0) { k = 3; min = 0x800;   c &= 0x0F; }
     else if ((c & 0xF8) == 0xF0) { k = 4; min = 0x10000; c &= 0x07; }
-    else { *cp = 0xFFFD; return 1; }
-    if (i + k > n) { *cp = 0xFFFD; return 1; }
+    else return 1;
+    if (!can_start(c, 1, k, min))
+        return 1;
     for (int j = 1; j < k; j++) {
-        if ((s[i + j] & 0xC0) != 0x80) { *cp = 0xFFFD; return 1; }
-        c = c << 6 | (s[i + j] & 0x3F);
+        if (i + j >= n || (s[i + j] & 0xC0) != 0x80)
+            return j;
+        unsigned v = c << 6 | (s[i + j] & 0x3F);
+        if (!can_start(v, j + 1, k, min))
+            return j;
+        c = v;
     }
-    if (c < min || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF)) { *cp = 0xFFFD; return 1; }
     *cp = c;
     return k;
 }
@@ -255,8 +271,10 @@ BOOL DestroyWindow(HWND hw)
 }
 
 /* ---------------- Explorer ---------------- */
-static int explorer_up = 1, icon_present, ghosts;
-static DWORD notify_on;                     // the call during which notify_hook runs
+static enum { DOWN, UP, SLOW } explorer = UP;   // SLOW: does the work, but reports a timeout
+static int icon_present, ghosts;
+#define NO_CALL ((DWORD)-1)
+static DWORD notify_on = NO_CALL;           // the call during which notify_hook runs
 static void (*notify_hook)(void);
 BOOL Shell_NotifyIconW(DWORD m, NOTIFYICONDATAW *d)
 {
@@ -268,12 +286,11 @@ BOOL Shell_NotifyIconW(DWORD m, NOTIFYICONDATAW *d)
     }
     if (!WIN(d->hWnd).alive)
         ghosts++;                           // icon added or changed for a closing window
-    if (!explorer_up)
+    if (explorer == DOWN)
         return FALSE;
-    if (m == NIM_MODIFY)
-        return icon_present;
-    icon_present = 1;
-    return TRUE;
+    if (m == NIM_ADD)
+        icon_present = 1;
+    return icon_present && explorer == UP;
 }
 
 /* ---------------- the rest ---------------- */
@@ -317,32 +334,8 @@ BOOL TranslateMessage(const MSG *m) { (void)m; return TRUE; }
 LRESULT DispatchMessageW(const MSG *m) { (void)m; return 0; }
 
 /* ---------------- to_wide ---------------- */
-// The same cuts as to_wide, but it steps back one byte at a time instead of one
-// per unit too many. The reference for invalid UTF-8 and for the call count.
-static void to_wide_bytewise(const char *s, wchar_t *out, int size)
-{
-    out[0] = 0;
-    if (!s)
-        return;
-    int bytes = lstrlenA(s);
-    if (bytes > 3 * (size - 1))
-        bytes = 3 * (size - 1);
-    for (;;) {
-        int cut = bytes;
-        while (bytes > 0 && cut - bytes < 3 && (s[bytes] & 0xC0) == 0x80)
-            bytes--;
-        if ((s[bytes] & 0xC0) == 0x80)
-            bytes = cut;
-        int need = bytes ? MultiByteToWideChar(CP_UTF8, 0, s, bytes, NULL, 0) : 0;
-        if (need <= size - 1) {
-            int n = need ? MultiByteToWideChar(CP_UTF8, 0, s, bytes, out, size - 1) : 0;
-            out[n] = 0;
-            return;
-        }
-        bytes--;
-    }
-}
-// Expected result for valid UTF-8: the longest run of whole characters that fits.
+// Expected result: the longest run of whole characters that fits, split the way
+// the decoder above splits the whole text, so no cut changes a character.
 static void ref_conv(const char *s, int size, wchar_t *out)
 {
     int used;
@@ -375,9 +368,9 @@ static void test_to_wide(void)
 {
     printf("to_wide\n");
     static char s[1400];
-    static wchar_t a[300], b[300], r[300];
+    static wchar_t a[300], r[300];
     static const int small[] = {1, 2, 3, 4, 5, 6, 8, 13, 32}, big[] = {128, 256, 260};
-    int bad_ref = 0, bad_inv = 0, overlong = 0;
+    int bad_ref = 0, bad_inv = 0;
     srand(1);
     for (int it = 0; it < 101000; it++) {           // valid UTF-8, all character sizes
         int bigcase = it >= 100000;
@@ -396,27 +389,36 @@ static void test_to_wide(void)
             s[i] = (char)(1 + rand() % 255);
         s[len] = 0;
         to_wide(s, a, size);
-        to_wide_bytewise(s, b, size);
-        bad_inv += !wsame(a, b);
-        overlong += wlen(a) > size - 1;
+        ref_conv(s, size, r);
+        bad_inv += !wsame(a, r);
     }
     CHECK(bad_ref == 0);
     CHECK(bad_inv == 0);
-    CHECK(overlong == 0);
     memset(s, 'a', 1000);
     s[1000] = 0;
-    mb_calls = 0; to_wide(s, a, 256); long now = mb_calls;
-    mb_calls = 0; to_wide_bytewise(s, b, 256); long bytewise = mb_calls;
-    printf("  1000 chars cut to 255: %ld conversion calls, %ld one byte at a time\n", now, bytewise);
-    CHECK(now <= 2);
+    mb_calls = 0; to_wide(s, a, 256);
+    printf("  1000 chars cut to 255: %ld conversion calls\n", mb_calls);
+    CHECK(mb_calls <= 2);
     mb_calls = 0; to_wide("Exit", a, 256);
     CHECK(mb_calls == 1);                           // shorter than the buffer: no size query
 
-    memset(s, 'x', 3);                              // invalid: "xxx" and 200 stray continuation bytes
+    // Invalid text, where the stray bytes at the cut each convert to U+FFFD.
+    memset(s, 'x', 3);                              // "xxx" and 200 stray continuation bytes
     memset(s + 3, 0x80, 200);
     s[203] = 0;
     to_wide(s, a, 128);
-    CHECK(wlen(a) == 127);                          // the cut stays among the stray bytes, each one U+FFFD
+    CHECK(wlen(a) == 127);
+    memset(s, 'a', 125);                            // a whole character, then 2 stray bytes at the cut
+    strcpy(s + 125, "\xC3\xA9\x80\x80" "bbbb");
+    to_wide(s, a, 128);
+    CHECK(wlen(a) == 127);
+    to_wide("A\x80\x80", a, 2);
+    CHECK(wlen(a) == 1);
+
+    memset(s, 'a', 126);                            // valid: an emoji that doesn't fit
+    strcpy(s + 126, "\xF0\x9F\x98\x80");
+    to_wide(s, a, 128);
+    CHECK(wlen(a) == 126);                          // dropped whole, not shown as U+FFFD
 }
 
 /* ---------------- tray tests ---------------- */
@@ -454,6 +456,7 @@ static void closed_at(int line, int blocking)
     CHECK(thread_timers == 0);                      // no SetTimer(NULL, ...)
     quit_posted = thread_timers = 0;                // a failure here must not fail later tests too
     track_hook = cb_hook = item_hook = notify_hook = NULL;
+    notify_on = NO_CALL;
     if (fails > before)
         printf("    called from line %d\n", line);
 }
@@ -596,10 +599,10 @@ static void close_window(void) { DestroyWindow(W); }
 static void test_explorer(void)
 {
     printf("explorer\n");
-    explorer_up = 0;
+    explorer = DOWN;
     start(&t_menu);
     CHECK(retry_timer_on && !icon_present);         // Explorer not running yet
-    explorer_up = 1;
+    explorer = UP;
     wnd_proc(W, WM_TIMER, RETRY_TIMER, 0);
     CHECK(icon_present && !retry_timer_on);         // added on retry
     icon_present = 0;
@@ -609,16 +612,18 @@ static void test_explorer(void)
 
     // Closed while Shell_NotifyIconW waits for Explorer: no icon may be left for the
     // closed window, and no SetTimer(NULL, ...). Without an icon, NIM_MODIFY fails
-    // and NIM_ADD comes next; with Explorer down, NIM_ADD fails too.
-    static const struct { DWORD call; int up; } cases[] = {{NIM_MODIFY, 1}, {NIM_ADD, 1}, {NIM_ADD, 0}};
+    // and NIM_ADD comes next. With Explorer down, NIM_ADD fails too; with Explorer
+    // slow, it reports a timeout but the icon is added anyway.
+    static const struct { DWORD call; int state; } cases[] = {
+        {NIM_MODIFY, UP}, {NIM_ADD, UP}, {NIM_ADD, DOWN}, {NIM_ADD, SLOW}};
     for (int i = 0; i < (int)ARRAYSIZE(cases); i++) {
         int before = fails;
         start(&t_menu);
         icon_present = cases[i].call == NIM_MODIFY;
-        explorer_up = cases[i].up;
+        explorer = cases[i].state;
         notify_on = cases[i].call; notify_hook = close_window;
         wnd_proc(W, TASKBAR_CREATED, 0, 0);
-        explorer_up = 1;
+        explorer = UP;
         closed();
         if (fails > before)
             printf("    in case %d\n", i);
@@ -695,6 +700,7 @@ int main(int argc, char **argv)
     test_explorer();
     test_loop();
     test_limits();
+    CHECK(thread_timers == 0);                      // none after the last closed() either
     printf(fails ? "%d FAILED\n" : "all passed\n", fails);
     return fails != 0;
 }
