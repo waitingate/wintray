@@ -44,9 +44,11 @@ static void to_wide(const char *s, wchar_t *out, int size)
             bytes--;                 // don't split a multi-byte character
         if (!bytes)
             return;
-        // Ask for the size first. What MultiByteToWideChar does with a buffer
-        // that is too small differs between Windows and Wine.
-        int need = MultiByteToWideChar(CP_UTF8, 0, s, bytes, NULL, 0);
+        // Fewer bytes than the buffer has room for always fit, since a UTF-16
+        // unit takes at least one byte. Otherwise ask for the size first: what
+        // MultiByteToWideChar does with a buffer that is too small differs
+        // between Windows and Wine.
+        int need = bytes < size ? bytes : MultiByteToWideChar(CP_UTF8, 0, s, bytes, NULL, 0);
         if (need <= size - 1) {
             out[MultiByteToWideChar(CP_UTF8, 0, s, bytes, out, size - 1)] = 0;
             return;

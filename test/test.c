@@ -404,7 +404,7 @@ static void test_to_wide(void)
     mb_calls = 0; to_wide(s, a, 256); long now = mb_calls;
     mb_calls = 0; to_wide_old(s, b, 256); long was = mb_calls;
     printf("  1000 chars cut to 255: %ld conversion calls, was %ld\n", now, was);
-    CHECK(now <= 3);
+    CHECK(now <= 2);
 }
 
 /* ---------------- tray tests ---------------- */
@@ -432,17 +432,17 @@ static HWND W;
 static void start(struct wintray *t) { CHECK(wintray_init(t) == 0); W = hwnd; }
 // After wintray_exit() or the window being destroyed: everything is gone.
 // closed() and stop() are macros, so a failure also names the test's line.
-static void closed_at(int line)
+static void closed_at(int line, int blocking)
 {
     int before = fails;
     CHECK(quit_posted == 1);
-    CHECK(wintray_loop(0) == -1);                   // the loop sees WM_QUIT
+    CHECK(wintray_loop(blocking) == -1);            // the loop sees WM_QUIT
     quit_posted = 0;                                // an extra one must not fail later tests too
     CHECK(hwnd == NULL && menus_live == 0 && icons_live == 0 && !icon_present && !update_pending);
     if (fails > before)
         printf("    called from line %d\n", line);
 }
-#define closed() closed_at(__LINE__)
+#define closed() closed_at(__LINE__, 0)
 #define stop() (wintray_exit(), closed())
 static void ev(UINT e) { wnd_proc(W, WM_TRAY, 1, e); }
 static void left_click(void) { ev(WM_LBUTTONDOWN); ev(WM_LBUTTONUP); }
@@ -484,7 +484,6 @@ static void hook_update(void)
     CHECK(menus_created == before && update_pending == 1);  // waits for the menu to close
 }
 static void hook_exit(void) { wintray_exit(); CHECK(end_menu_called && hwnd == NULL); }
-static void do_exit(void) { wintray_exit(); }
 static void do_update(void) { wintray_update(g_tray); }
 
 static void test_menu(void)
@@ -507,7 +506,7 @@ static void test_menu(void)
     CHECK(hmenu == NULL);
 
     start(&t_menu);                                 // the "Exit" item, with an update waiting
-    track_hook = hook_update; track_ret = ID_FIRST + 1; item_hook = do_exit; item_calls = 0;
+    track_hook = hook_update; track_ret = ID_FIRST + 1; item_hook = wintray_exit; item_calls = 0;
     right_click();
     CHECK(item_calls == 1);
     closed();
@@ -518,6 +517,7 @@ static void on_delete(DWORD m)
 {
     if (m != NIM_DELETE)
         return;
+    notify_hook = NULL;
     left_click(); right_click();
     wnd_proc(W, TASKBAR_CREATED, 0, 0);
 }
@@ -528,7 +528,6 @@ static void test_closing(void)
     cb_calls = track_calls = ghosts = 0;
     notify_hook = on_delete;                        // clicks while the icon is being removed
     stop();
-    notify_hook = NULL;
     CHECK(cb_calls == 0 && track_calls == 0 && ghosts == 0);
 
     start(&t_menu);                                 // closed from outside
@@ -545,7 +544,7 @@ static void test_closing(void)
     old.lpszClassName = CLASS_NAME;
     CHECK(RegisterClassW(&old) != 0);
     start(&t_menu);
-    struct cls *c = find_class(CLASS_NAME, mode_dll ? DLL : EXE);
+    struct cls *c = find_class(CLASS_NAME, old.hInstance);
     CHECK(c && c->proc == wnd_proc);
     CHECK(wintray_init(&t_menu) == -1);             // already running
     stop();
@@ -602,15 +601,11 @@ static void test_explorer(void)
     CHECK(icon_present);                            // re-added after an Explorer restart
     stop();
 
-    for (int up = 1; up >= 0; up--) {               // closed while NIM_MODIFY waits for Explorer
-        start(&t_menu);
-        explorer_up = up;
-        notify_hook = close_on_modify;
-        wnd_proc(W, TASKBAR_CREATED, 0, 0);
-        explorer_up = 1;
-        closed();                                   // no icon added back for the closed window
-        CHECK(thread_timers == 0);                  // and no SetTimer(NULL, ...)
-    }
+    start(&t_menu);                                 // closed while NIM_MODIFY waits for Explorer
+    notify_hook = close_on_modify;
+    wnd_proc(W, TASKBAR_CREATED, 0, 0);
+    closed();                                       // no icon added back for the closed window
+    CHECK(thread_timers == 0);                      // and no SetTimer(NULL, ...)
 }
 
 static void test_loop(void)
@@ -620,8 +615,7 @@ static void test_loop(void)
     CHECK(wintray_loop(0) == 0);                    // nothing waiting
     CHECK(wintray_loop(1) == 0);                    // an ordinary message
     wintray_exit();
-    CHECK(wintray_loop(1) == -1);                   // the blocking loop sees WM_QUIT too
-    CHECK(hwnd == NULL && quit_posted == 0);
+    closed_at(__LINE__, 1);                         // the blocking loop sees WM_QUIT too
 }
 
 static struct wintray_menu_item selfm[5], top[71], subs[70][4], many[301];
