@@ -14,8 +14,9 @@ jobs:
         run: |
           for t in x86_64 i686; do
             $t-w64-mingw32-gcc -std=c99 -Os -Wall -Wextra -Wpedantic -Werror -c wintray.c -o wintray-$t.o
-            # No C runtime: every undefined symbol must be a Win32 import.
-            if $t-w64-mingw32-nm -u wintray-$t.o | grep -v __imp_; then exit 1; fi
+            # No C runtime: the object must link with nothing but these three Windows DLLs.
+            # (ld warns that the DLL has no entry point; nothing ever runs it.)
+            $t-w64-mingw32-gcc -shared -nostdlib -o wintray-$t.dll wintray-$t.o -lkernel32 -luser32 -lshell32
           done
       - name: Run the tests
         run: |

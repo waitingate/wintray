@@ -245,6 +245,8 @@ BOOL UnregisterClassW(LPCWSTR name, HINSTANCE inst)
 struct win { int alive; struct cls *c; };  // alive until DestroyWindow starts
 static struct win wins[1000];
 static int nwins;
+static HWND timer_hwnd;                     // the window timer that is set, if any
+static UINT_PTR timer_id;
 #define WIN(h) wins[(uintptr_t)(h) / 16]
 HWND CreateWindowW(LPCWSTR cls, LPCWSTR title, DWORD st, int x, int y, int w, int h,
                    HWND parent, HMENU menu, HINSTANCE inst, void *param)
@@ -268,37 +270,57 @@ BOOL DestroyWindow(HWND hw)
     WIN(hw).c->proc(hw, WM_DESTROY, 0, 0);
     WIN(hw).c->proc(hw, 0x0082, 0, 0);      // WM_NCDESTROY
     WIN(hw).c->windows--;
+    if (timer_hwnd == hw)
+        timer_hwnd = NULL;                  // a window's timers go with it
     return TRUE;
 }
 
 /* ---------------- Explorer ---------------- */
+// Explorer keeps icons by window and ID, and works on a copy of the request
+// taken when the call starts, before the messages handled while it waits.
 static enum { DOWN, UP, SLOW } explorer = UP;   // SLOW: does the work, but reports a timeout
-static int icon_present, ghosts;
+static struct { HWND hwnd; UINT uid; } shown[8];   // the icons in the tray
+static int nshown, ghosts, notify_calls;
 #define NO_CALL ((DWORD)-1)
 static DWORD notify_on = NO_CALL;           // the call during which notify_hook runs
 static void (*notify_hook)(void);
+static int find_icon(HWND h, UINT uid)
+{
+    for (int i = 0; i < nshown; i++)
+        if (shown[i].hwnd == h && shown[i].uid == uid)
+            return i;
+    return -1;
+}
+static void forget_icons(void) { nshown = 0; }   // Explorer restarted
 BOOL Shell_NotifyIconW(DWORD m, NOTIFYICONDATAW *d)
 {
+    NOTIFYICONDATAW r = *d;
+    notify_calls++;
     if (m == notify_on)
         run_hook(&notify_hook);             // messages handled while it waits for Explorer
+    int i = find_icon(r.hWnd, r.uID);
     if (m == NIM_DELETE) {
-        icon_present = 0;
-        return TRUE;
+        if (i >= 0)
+            shown[i] = shown[--nshown];
+        return i >= 0;
     }
-    if (!WIN(d->hWnd).alive)
+    if (!WIN(r.hWnd).alive)
         ghosts++;                           // icon added or changed for a closing window
     if (explorer == DOWN)
         return FALSE;
     if (m == NIM_ADD) {
-        if (icon_present)
+        if (i >= 0)
             return FALSE;                   // already there
-        icon_present = 1;
+        CHECK(nshown < (int)ARRAYSIZE(shown));
+        i = nshown++;
+        shown[i].hwnd = r.hWnd;
+        shown[i].uid = r.uID;
     }
-    return icon_present && explorer == UP;
+    return i >= 0 && explorer == UP;
 }
 
 /* ---------------- the rest ---------------- */
-static int retry_timer_on, thread_timers, quit_posted;
+static int thread_timers, quit_posted;
 UINT_PTR SetTimer(HWND h, UINT_PTR id, UINT ms, void *f)
 {
     (void)ms; (void)f;
@@ -306,10 +328,17 @@ UINT_PTR SetTimer(HWND h, UINT_PTR id, UINT ms, void *f)
         thread_timers++;
         return 99;
     }
-    retry_timer_on = 1;
+    timer_hwnd = h;
+    timer_id = id;
     return id;
 }
-BOOL KillTimer(HWND h, UINT_PTR id) { (void)id; if (h) retry_timer_on = 0; return TRUE; }
+BOOL KillTimer(HWND h, UINT_PTR id)
+{
+    if (!h || h != timer_hwnd || id != timer_id)
+        return FALSE;
+    timer_hwnd = NULL;
+    return TRUE;
+}
 BOOL GetCursorPos(POINT *p) { p->x = p->y = 0; return TRUE; }
 BOOL SetForegroundWindow(HWND h) { (void)h; return TRUE; }
 BOOL PostMessageW(HWND h, UINT m, WPARAM w, LPARAM l) { (void)h; (void)m; (void)w; (void)l; return TRUE; }
@@ -357,14 +386,17 @@ static int put_utf8(unsigned c, char *p)
     p[2] = (char)(0x80 | (c >> 6 & 0x3F)); p[3] = (char)(0x80 | (c & 0x3F));
     return 4;
 }
+// rand() gives only 15 bits with MinGW, so two calls, or most code points
+// above U+8800 would never come up in a test run on Windows.
+static unsigned rand_wide(void) { return (unsigned)rand() << 15 ^ (unsigned)rand(); }
 static unsigned rand_cp(void)
 {
     unsigned c;
     switch (rand() % 4) {
     case 0: return 1 + rand() % 0x7F;
     case 1: return 0x80 + rand() % (0x800 - 0x80);
-    case 2: do c = 0x800 + rand() % (0x10000 - 0x800); while (c >= 0xD800 && c <= 0xDFFF); return c;
-    default: return 0x10000 + rand() % (0x110000 - 0x10000);
+    case 2: do c = 0x800 + rand_wide() % (0x10000 - 0x800); while (c >= 0xD800 && c <= 0xDFFF); return c;
+    default: return 0x10000 + rand_wide() % (0x110000 - 0x10000);
     }
 }
 
@@ -455,7 +487,7 @@ static void closed_at(int line, int blocking)
     int before = fails;
     CHECK(quit_posted == 1);
     CHECK(wintray_loop(blocking) == -1 && quit_posted == 0);   // the loop takes the WM_QUIT
-    CHECK(hwnd == NULL && menus_live == 0 && icons_live == 0 && !icon_present && !update_pending);
+    CHECK(hwnd == NULL && menus_live == 0 && icons_live == 0 && nshown == 0 && !update_pending);
     CHECK(!track_hook && !cb_hook && !item_hook && !notify_hook);   // every hook ran
     CHECK(thread_timers == 0);                      // no SetTimer(NULL, ...)
     // A failure here must not fail later tests too.
@@ -471,16 +503,18 @@ static void closed_at(int line, int blocking)
 #define stop() (wintray_exit(), closed())
 
 // Without an icon window, wintray_update() must do nothing at all: no menu, no
-// icon, no Shell_NotifyIconW call, and wintray_get_instance() stays as it was.
+// icon, no Shell_NotifyIconW call, no change to nid, and wintray_get_instance()
+// stays as it was.
 static void update_without_window_at(int line)
 {
     static struct wintray other = {NULL, "other", NULL, menu1, 1};
     struct wintray *instance = wintray_get_instance();
-    int before = fails, menus = menus_created, icons = icons_created;
-    ghosts = 0;
+    NOTIFYICONDATAW was;
+    memcpy(&was, &nid, sizeof nid);
+    int before = fails, menus = menus_created, icons = icons_created, calls = notify_calls;
     wintray_update(&other);
-    CHECK(menus_created == menus && icons_created == icons && ghosts == 0);
-    CHECK(wintray_get_instance() == instance);
+    CHECK(menus_created == menus && icons_created == icons && notify_calls == calls);
+    CHECK(wintray_get_instance() == instance && !memcmp(&was, &nid, sizeof nid));
     if (fails > before)
         printf("    called from line %d\n", line);
 }
@@ -627,13 +661,13 @@ static void test_explorer(void)
     printf("explorer\n");
     explorer = DOWN;
     start(&t_menu);
-    CHECK(retry_timer_on && !icon_present);         // Explorer not running yet
+    CHECK(timer_hwnd == W && nshown == 0);          // Explorer not running yet: a retry timer
     explorer = UP;
-    wnd_proc(W, WM_TIMER, RETRY_TIMER, 0);
-    CHECK(icon_present && !retry_timer_on);         // added on retry
-    icon_present = 0;
+    wnd_proc(W, WM_TIMER, timer_id, 0);             // the timer the library set
+    CHECK(nshown == 1 && timer_hwnd == NULL);       // added on retry, and the timer killed
+    forget_icons();
     wnd_proc(W, TASKBAR_CREATED, 0, 0);
-    CHECK(icon_present);                            // re-added after an Explorer restart
+    CHECK(nshown == 1);                             // re-added after an Explorer restart
     stop();
 
     // Closed while Shell_NotifyIconW waits for Explorer: no icon may be left for the
@@ -646,7 +680,8 @@ static void test_explorer(void)
     for (int i = 0; i < (int)ARRAYSIZE(cases); i++) {
         int before = fails;
         start(&t_menu);
-        icon_present = cases[i].call == NIM_MODIFY;
+        if (cases[i].call == NIM_ADD)
+            forget_icons();                         // so NIM_MODIFY fails and NIM_ADD follows
         explorer = cases[i].state;
         ghosts = 0;
         notify_on = cases[i].call; notify_hook = close_window;
@@ -717,6 +752,11 @@ static void test_limits(void)
 int main(int argc, char **argv)
 {
     const char *mode = argc > 1 ? argv[1] : "exe";
+    setvbuf(stdout, NULL, _IONBF, 0);               // a run that hangs still shows how far it got
+    if (strcmp(mode, "exe") && strcmp(mode, "dll") && strcmp(mode, "gmhfail")) {
+        printf("unknown mode %s: use exe, dll or gmhfail\n", mode);
+        return 2;
+    }
     mode_dll = !strcmp(mode, "dll");
     mode_gmh_fail = !strcmp(mode, "gmhfail");
     printf("== %s\n", mode);

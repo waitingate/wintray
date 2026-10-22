@@ -8,5 +8,5 @@ out="${TMPDIR:-/tmp}/wintray-logic-test"
 ${CC:-gcc} -std=gnu11 -fshort-wchar -g -O1 -fsanitize=address,undefined \
     -fno-sanitize-recover=undefined -Wall -Wextra -I . test.c -o "$out"
 for mode in exe dll gmhfail; do
-    "$out" "$mode"
+    timeout 120 "$out" "$mode"      # a hang fails here, after the name of the test that hung
 done

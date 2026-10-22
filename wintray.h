@@ -17,8 +17,11 @@
 // also runs thread timers (SetTimer with a NULL window), so a timer callback is
 // a good place for periodic work, including wintray_update().
 //
-// The library keeps pointers to the wintray struct and the menu arrays, so they
-// must stay valid while the icon exists (static or global).
+// To show the icon again after wintray_exit(), call wintray_init() once
+// wintray_loop() has returned -1, not from inside a callback or timer.
+//
+// The library keeps pointers to the wintray struct, the menu arrays and their
+// strings, so they must stay valid while the icon exists (static or global).
 //
 // wintray_update() does nothing while there is no icon window: before
 // wintray_init(), and after wintray_exit() or the window being closed, until the
@@ -26,8 +29,9 @@
 // the icon is shown, on the thread that will call wintray_init().
 //
 // Limits: one icon per process, 256 menu items, 256 submenus, 8 submenu levels,
-// 255 characters per menu item and 127 for the tooltip (longer text is cut at a
-// whole character). Windows 7 or later.
+// 255 UTF-16 units of text per menu item and 127 for the tooltip (an emoji takes
+// two). Longer text is cut between characters, which can split an emoji made of
+// several, such as a flag. Windows 7 or later.
 
 #ifndef WINTRAY_H
 #define WINTRAY_H
@@ -41,7 +45,7 @@ extern "C" {
 struct wintray_menu_item;
 
 struct wintray {
-    const char *icon_filepath;          // .ico file (absolute path), used if icon_id is 0
+    const char *icon_filepath;          // .ico file (full path), used if icon_id is 0
     const char *tooltip;                // UTF-8
     void (*cb)(struct wintray *);       // left click; if NULL, left click opens the menu
     struct wintray_menu_item *menu;     // ends with an item whose text is NULL
@@ -50,18 +54,20 @@ struct wintray {
 
 struct wintray_menu_item {
     const char *text;                   // UTF-8, "-" for a separator
-    int disabled;
-    int checked;
-    void (*cb)(struct wintray_menu_item *);
+    int disabled;                       // 1: grayed out
+    int checked;                        // 1: check mark
+    void (*cb)(struct wintray_menu_item *);    // called when the item is clicked
     struct wintray_menu_item *submenu;  // NULL, or an array like the main menu
 };
 
-struct wintray *wintray_get_instance(void); // the struct the icon last used; NULL before the first init
-
 int  wintray_init(struct wintray *tray);    // 0 on success, -1 on error or if already running
-int  wintray_loop(int blocking);            // returns -1 once the tray has been closed
+int  wintray_loop(int blocking);            // handles one message (1: waits for one); -1 once closed
 void wintray_update(struct wintray *tray);  // call after changing the icon, tooltip or menu
 void wintray_exit(void);                    // removes the icon and posts WM_QUIT
+
+// The struct that the last wintray_init() or wintray_update() took (an update
+// without an icon window takes nothing); NULL before the first wintray_init().
+struct wintray *wintray_get_instance(void);
 
 #ifdef __cplusplus
 }

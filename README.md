@@ -53,7 +53,10 @@ gcc -Os -s -mwindows -static -o app.exe app.c wintray.c -luser32 -lshell32
 ```
 
 - `-mwindows` makes a program without a console window.
-- `-static` puts the MinGW runtime into the exe, so it runs on other PCs.
+- `-static` puts the MinGW runtime into the exe, so it runs on PCs without
+  MinGW. With the usual UCRT build of MinGW-w64, the exe also needs the
+  Universal C Runtime: Windows 10 and 11 have it, Windows 7 and 8.1 get it
+  with update KB2999226.
 - `-Os -s` make the exe smaller.
 - `-luser32 -lshell32` link the two Windows libraries that wintray uses.
 
@@ -84,7 +87,8 @@ folder.
 
 ## Examples
 
-Each example is a complete program; build it like the quick start.
+Each example with a `main()` is a complete program; build it like the quick
+start.
 
 ### Check marks, submenus and separators
 
@@ -103,7 +107,7 @@ static void pick_speed(struct wintray_menu_item *item);
 
 static struct wintray_menu_item speed[] = {
     { .text = "Slow", .cb = pick_speed },
-    { .text = "Normal", .cb = pick_speed, .checked = 1 },
+    { .text = "Normal", .checked = 1, .cb = pick_speed },
     { .text = "Fast", .cb = pick_speed },
     { 0 }
 };
@@ -227,20 +231,30 @@ and `2 ICON "busy.ico"`), set `tray.icon_id = 2` and call `wintray_update(&tray)
 
 ### Keep your own main loop
 
-`wintray_loop(1)` waits for the next click. `wintray_loop(0)` handles one
-waiting message, if there is one, and returns at once:
+`wintray_loop(1)` waits for the next message, such as a click or a timer, and
+handles it. `wintray_loop(0)` handles one message if one is waiting, and
+otherwise returns at once. Either way, the call returns only after the message
+is handled: when a click opens the menu, that is when the menu closes, and the
+same goes for a callback that shows a dialog.
+
+If your program has a loop of its own, put this in place of the quick start's
+`while` line, with `#include <windows.h>` at the top. It waits up to 10 ms for
+a message instead of sleeping, so a click is handled at once:
 
 ```c
-while (wintray_loop(0) == 0) {
+for (;;) {
     // your own work here
-    Sleep(10);
+    MsgWaitForMultipleObjectsEx(0, NULL, 10, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+    if (wintray_loop(0) < 0)
+        break;
 }
 ```
 
 ### From C++
 
-`wintray.h` works from C++. Compile `wintray.c` as C, and before C++20 fill
-the structs in the order of their fields (see the API below):
+`wintray.h` works from C++. Compile `wintray.c` as C. C++20 takes the
+`.field =` style of the C examples, with the fields in the order of the API
+below; before C++20, list the values in that order:
 
 ```cpp
 #include "wintray.h"
@@ -286,10 +300,13 @@ struct wintray_menu_item {
 };
 
 int  wintray_init(struct wintray *tray);    // 0 on success, -1 on error or if already running
-int  wintray_loop(int blocking);            // returns -1 once the tray has been closed
+int  wintray_loop(int blocking);            // handles one message (1: waits for one); -1 once closed
 void wintray_update(struct wintray *tray);  // call after changing the icon, tooltip or menu
 void wintray_exit(void);                    // removes the icon and posts WM_QUIT
-struct wintray *wintray_get_instance(void); // the struct the icon last used; NULL before the first init
+
+// The struct that the last wintray_init() or wintray_update() took (an update
+// without an icon window takes nothing); NULL before the first wintray_init().
+struct wintray *wintray_get_instance(void);
 ```
 
 ## Good to know
@@ -306,20 +323,27 @@ struct wintray *wintray_get_instance(void); // the struct the icon last used; NU
 - If Explorer restarts, the icon comes back on its own.
 - `wintray_exit()` posts `WM_QUIT`, which ends every message loop on the
   thread: a `MessageBox` shown after it in the same callback closes at once.
-  To show the icon again, call `wintray_init()` after `wintray_loop()` has
-  returned -1. A `WM_QUIT` from your own code also ends `wintray_loop()`, but
-  then the icon stays until you call `wintray_exit()`.
+  To show the icon again, call `wintray_init()` once `wintray_loop()` has
+  returned -1, not from inside a callback or timer.
+- A `WM_QUIT` from your own code also ends `wintray_loop()`, but the icon
+  stays. Call `wintray_exit()` to remove it. That posts one more `WM_QUIT`,
+  so before a new `wintray_init()`, call `wintray_loop()` once more: it
+  returns -1 at once.
 - In a DLL, run wintray on its own thread, since `wintray_exit()` posts
   `WM_QUIT`, and call `wintray_exit()` before the DLL is unloaded.
 - With other compilers, add `wintray.c` to your project and link `user32` and
-  `shell32`. I haven't tried MSVC yet. Without the C runtime, compile with
-  `/GS-`: MSVC's default stack checks call into the runtime.
+  `shell32`, and `kernel32` if your project leaves out the default libraries.
+  I haven't tried MSVC yet. Without the C runtime, turn off its checks that
+  call into the runtime: `/GS-`, and in a new Visual Studio project also the
+  SDL checks (`/sdl-`), the run-time checks (no `/RTC1`) and Just My Code
+  (`/JMC-`).
 
 ## Limits
 
 One icon per program, up to 256 menu items and 256 submenus (8 levels deep),
-255 characters per menu item and 127 for the tooltip. Longer text is cut at a
-whole character. Windows 7 or later.
+255 characters per menu item and 127 for the tooltip, counted in UTF-16 units:
+an emoji counts as two. Longer text is cut between characters, which can split
+an emoji made of several, such as a flag. Windows 7 or later.
 
 ## Coming from zserge/tray or dmikushin/tray
 
