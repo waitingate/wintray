@@ -21,10 +21,13 @@
 // must stay valid while the icon exists (static or global).
 //
 // Limits: one icon per process, 256 menu items, 256 submenus, 8 submenu levels,
-// 255 characters per menu item and 127 for the tooltip. Windows 7 or later.
+// 255 characters per menu item and 127 for the tooltip (longer text is cut at a
+// whole character). Windows 7 or later.
 
 #ifndef WINTRAY_H
 #define WINTRAY_H
+
+#include <stddef.h>                     // NULL, which ends the menu arrays
 
 #ifdef __cplusplus
 extern "C" {
