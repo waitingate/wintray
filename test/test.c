@@ -431,14 +431,19 @@ static struct wintray t_menu = {NULL, "tip", NULL, menu1, 1};
 static HWND W;
 static void start(struct wintray *t) { CHECK(wintray_init(t) == 0); W = hwnd; }
 // After wintray_exit() or the window being destroyed: everything is gone.
-static void closed(void)
+// closed() and stop() are macros, so a failure also names the test's line.
+static void closed_at(int line)
 {
+    int before = fails;
     CHECK(quit_posted == 1);
     CHECK(wintray_loop(0) == -1);                   // the loop sees WM_QUIT
     quit_posted = 0;                                // an extra one must not fail later tests too
     CHECK(hwnd == NULL && menus_live == 0 && icons_live == 0 && !icon_present && !update_pending);
+    if (fails > before)
+        printf("    called from line %d\n", line);
 }
-static void stop(void) { wintray_exit(); closed(); }
+#define closed() closed_at(__LINE__)
+#define stop() (wintray_exit(), closed())
 static void ev(UINT e) { wnd_proc(W, WM_TRAY, 1, e); }
 static void left_click(void) { ev(WM_LBUTTONDOWN); ev(WM_LBUTTONUP); }
 static void second_click(void) { ev(WM_LBUTTONDBLCLK); ev(WM_LBUTTONUP); }
@@ -608,6 +613,17 @@ static void test_explorer(void)
     }
 }
 
+static void test_loop(void)
+{
+    printf("loop\n");
+    start(&t_menu);
+    CHECK(wintray_loop(0) == 0);                    // nothing waiting
+    CHECK(wintray_loop(1) == 0);                    // an ordinary message
+    wintray_exit();
+    CHECK(wintray_loop(1) == -1);                   // the blocking loop sees WM_QUIT too
+    CHECK(hwnd == NULL && quit_posted == 0);
+}
+
 static struct wintray_menu_item selfm[5], top[71], subs[70][4], many[301];
 static struct wintray t_self = {NULL, "t", NULL, selfm, 0};
 static struct wintray t_top = {NULL, "t", NULL, top, 0};
@@ -665,6 +681,7 @@ int main(int argc, char **argv)
     test_closing();
     test_icons();
     test_explorer();
+    test_loop();
     test_limits();
     CHECK(thread_timers == 0);
     printf(fails ? "%d FAILED\n" : "all passed\n", fails);
