@@ -42,12 +42,13 @@ static void to_wide(const char *s, wchar_t *out, int size)
     for (;;) {
         while (bytes > 0 && (s[bytes] & 0xC0) == 0x80)
             bytes--;                 // don't split a multi-byte character
+        if (!bytes)
+            return;
         // Ask for the size first. What MultiByteToWideChar does with a buffer
         // that is too small differs between Windows and Wine.
-        int need = bytes ? MultiByteToWideChar(CP_UTF8, 0, s, bytes, NULL, 0) : 0;
+        int need = MultiByteToWideChar(CP_UTF8, 0, s, bytes, NULL, 0);
         if (need <= size - 1) {
-            int n = need ? MultiByteToWideChar(CP_UTF8, 0, s, bytes, out, size - 1) : 0;
-            out[n] = 0;
+            out[MultiByteToWideChar(CP_UTF8, 0, s, bytes, out, size - 1)] = 0;
             return;
         }
         bytes -= need - (size - 1);  // a UTF-16 unit takes at least one byte
@@ -63,7 +64,7 @@ static HMENU build_menu(struct wintray_menu_item *m, int depth)
             continue;
         }
         wchar_t text[256];
-        to_wide(m->text, text, 256);
+        to_wide(m->text, text, ARRAYSIZE(text));
         UINT flags = MF_STRING | (m->disabled ? MF_GRAYED : 0) | (m->checked ? MF_CHECKED : 0);
         if (m->submenu) {
             if (depth < MAX_DEPTH && menu_count < MAX_MENUS) {
@@ -107,7 +108,7 @@ static HICON load_icon(const struct wintray *t)
                                   IMAGE_ICON, cx, cy, 0);
     } else if (t->icon_filepath) {
         wchar_t path[MAX_PATH];
-        to_wide(t->icon_filepath, path, MAX_PATH);
+        to_wide(t->icon_filepath, path, ARRAYSIZE(path));
         h = (HICON)LoadImageW(NULL, path, IMAGE_ICON, cx, cy, LR_LOADFROMFILE);
     }
     icon_owned = (h != NULL);
@@ -145,12 +146,11 @@ static void show_menu(void)
         return;
     }
     PostMessageW(hwnd, WM_NULL, 0, 0);
-    if (cmd >= ID_FIRST && cmd - ID_FIRST < item_count && items[cmd - ID_FIRST]->cb)
-        items[cmd - ID_FIRST]->cb(items[cmd - ID_FIRST]);
-    if (update_pending) {
-        update_pending = 0;
+    UINT i = cmd - ID_FIRST;         // cmd 0 (nothing chosen) wraps around
+    if (i < item_count && items[i]->cb)
+        items[i]->cb(items[i]);
+    if (update_pending)
         wintray_update(g_tray);
-    }
 }
 
 // Runs on WM_DESTROY, so it also cleans up when the window is closed by
@@ -161,7 +161,6 @@ static void cleanup(void)
     // Shell_NotifyIconW waits for Explorer.
     hwnd = NULL;
     Shell_NotifyIconW(NIM_DELETE, &nid);
-    update_pending = 0;
     if (menu_open) {
         EndMenu();                   // show_menu() frees the menu when it returns
     } else if (hmenu) {
@@ -194,11 +193,8 @@ static LRESULT CALLBACK wnd_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
             show_menu();
         return 0;
     }
-    if (msg == WM_TIMER && wp == RETRY_TIMER) {
-        show_icon();
-        return 0;
-    }
-    if (msg == wm_taskbar_created && msg != 0) {   // Explorer restarted
+    // The retry timer from show_icon(), or TaskbarCreated: Explorer restarted.
+    if ((msg == WM_TIMER && wp == RETRY_TIMER) || (msg == wm_taskbar_created && msg != 0)) {
         show_icon();
         return 0;
     }
@@ -272,6 +268,7 @@ void wintray_update(struct wintray *tray)
         update_pending = 1;          // show_menu() calls us again when it closes
         return;
     }
+    update_pending = 0;              // this update covers a pending one
 
     if (hmenu)
         DestroyMenu(hmenu);          // destroys the submenus too
@@ -282,7 +279,7 @@ void wintray_update(struct wintray *tray)
     HICON old = nid.hIcon;
     int old_owned = icon_owned;
     nid.hIcon = load_icon(tray);
-    to_wide(tray->tooltip, nid.szTip, sizeof(nid.szTip) / sizeof(nid.szTip[0]));
+    to_wide(tray->tooltip, nid.szTip, ARRAYSIZE(nid.szTip));
     show_icon();
     if (old && old_owned)
         DestroyIcon(old);

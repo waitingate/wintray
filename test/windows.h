@@ -41,6 +41,7 @@ typedef struct {
 #define WM_RBUTTONUP     0x0205
 #define WM_APP           0x8000
 #define LOWORD(l)        ((unsigned short)((uintptr_t)(l) & 0xFFFF))
+#define ARRAYSIZE(a)     (sizeof(a) / sizeof((a)[0]))
 #define MAKEINTRESOURCEW(i) ((LPCWSTR)(uintptr_t)(unsigned short)(i))
 #define CP_UTF8          65001
 #define MF_STRING        0x0000

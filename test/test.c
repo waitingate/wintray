@@ -8,6 +8,15 @@
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("  FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
 
+// Runs a hook once. It is cleared before the call, since the hook may lead back here.
+static void run_hook(void (**h)(void))
+{
+    void (*f)(void) = *h;
+    *h = NULL;
+    if (f)
+        f();
+}
+
 /* ---------------- modules ---------------- */
 #define EXE ((HINSTANCE)(uintptr_t)0x400000)
 #define DLL ((HINSTANCE)(uintptr_t)0x10000000)
@@ -43,6 +52,12 @@ static int dec(const unsigned char *s, int n, int i, unsigned *cp)
     *cp = c;
     return k;
 }
+static void put_utf16(unsigned c, wchar_t *p)
+{
+    if (c < 0x10000) { p[0] = (wchar_t)c; return; }
+    p[0] = (wchar_t)(0xD800 + ((c - 0x10000) >> 10));
+    p[1] = (wchar_t)(0xDC00 + ((c - 0x10000) & 0x3FF));
+}
 
 static long mb_calls;
 int MultiByteToWideChar(UINT cp, DWORD fl, LPCSTR src, int n, wchar_t *out, int outn)
@@ -57,12 +72,7 @@ int MultiByteToWideChar(UINT cp, DWORD fl, LPCSTR src, int n, wchar_t *out, int 
         if (out) {
             if (units + u > outn)
                 return 0;
-            if (u == 2) {
-                out[units] = (wchar_t)(0xD800 + ((c - 0x10000) >> 10));
-                out[units + 1] = (wchar_t)(0xDC00 + ((c - 0x10000) & 0x3FF));
-            } else {
-                out[units] = (wchar_t)c;
-            }
+            put_utf16(c, out + units);
         }
         units += u;
         i += k;
@@ -129,11 +139,7 @@ BOOL TrackPopupMenu(HMENU m, UINT f, int x, int y, int r, HWND h, const void *rc
     CHECK(h != NULL && m != NULL);
     on_screen = (int)(uintptr_t)m;
     end_menu_called = 0;
-    if (track_hook) {                       // things that happen while the menu is open
-        void (*hk)(void) = track_hook;
-        track_hook = NULL;
-        hk();
-    }
+    run_hook(&track_hook);                  // things that happen while the menu is open
     on_screen = 0;
     return end_menu_called ? 0 : track_ret;
 }
@@ -328,12 +334,7 @@ static void ref_conv(const char *s, int size, wchar_t *out)
         int k = dec((const unsigned char *)s, n, i, &c), u = c >= 0x10000 ? 2 : 1;
         if (units + u > size - 1)
             break;
-        if (u == 2) {
-            out[units] = (wchar_t)(0xD800 + ((c - 0x10000) >> 10));
-            out[units + 1] = (wchar_t)(0xDC00 + ((c - 0x10000) & 0x3FF));
-        } else {
-            out[units] = (wchar_t)c;
-        }
+        put_utf16(c, out + units);
         units += u;
         i += k;
     }
@@ -361,7 +362,6 @@ static unsigned rand_cp(void)
     default: return 0x10000 + rand() % (0x110000 - 0x10000);
     }
 }
-static int wsame_all(const wchar_t *a, const wchar_t *b) { while (*a && *a == *b) a++, b++; return *a == *b; }
 
 static void test_to_wide(void)
 {
@@ -369,7 +369,7 @@ static void test_to_wide(void)
     static char s[1400];
     static wchar_t a[300], b[300], r[300];
     static const int small[] = {1, 2, 3, 4, 5, 6, 8, 13, 32}, big[] = {128, 256, 260};
-    int bad_ref = 0, bad_old = 0, bad_inv = 0, overlong = 0;
+    int bad_ref = 0, bad_inv = 0, overlong = 0;
     srand(1);
     for (int it = 0; it < 101000; it++) {           // valid UTF-8, all character sizes
         int bigcase = it >= 100000;
@@ -379,10 +379,8 @@ static void test_to_wide(void)
             len += put_utf8(rand_cp(), s + len);
         s[len] = 0;
         to_wide(s, a, size);
-        to_wide_old(s, b, size);
         ref_conv(s, size, r);
-        bad_ref += !wsame_all(a, r);
-        bad_old += !wsame_all(a, b);
+        bad_ref += !wsame(a, r);
     }
     for (int it = 0; it < 50000; it++) {            // random bytes, mostly not valid UTF-8
         int size = small[rand() % 9], len = rand() % 150;
@@ -391,14 +389,13 @@ static void test_to_wide(void)
         s[len] = 0;
         to_wide(s, a, size);
         to_wide_old(s, b, size);
-        bad_inv += !wsame_all(a, b);
+        bad_inv += !wsame(a, b);
         int n = 0;
         while (a[n])
             n++;
         overlong += n > size - 1;
     }
     CHECK(bad_ref == 0);
-    CHECK(bad_old == 0);
     CHECK(bad_inv == 0);
     CHECK(overlong == 0);
     memset(s, 'a', 1000);
@@ -416,13 +413,13 @@ static void tray_cb(struct wintray *t)
 {
     (void)t;
     cb_calls++;
-    if (cb_hook) { void (*h)(void) = cb_hook; cb_hook = NULL; h(); }
+    run_hook(&cb_hook);
 }
 static void item_cb(struct wintray_menu_item *m)
 {
     (void)m;
     item_calls++;
-    if (item_hook) { void (*h)(void) = item_hook; item_hook = NULL; h(); }
+    run_hook(&item_hook);
 }
 static struct wintray_menu_item menu1[] = {
     {"Item", 0, 0, item_cb, NULL}, {"-", 0, 0, NULL, NULL}, {"Exit", 0, 0, item_cb, NULL},
@@ -432,14 +429,16 @@ static struct wintray t_menu = {NULL, "tip", NULL, menu1, 1};
 
 static HWND W;
 static void start(struct wintray *t) { CHECK(wintray_init(t) == 0); W = hwnd; }
-static void stop(void)
+// After wintray_exit() or the window being destroyed: everything is gone.
+static void closed(void)
 {
-    wintray_exit();
     CHECK(quit_posted == 1);
     CHECK(wintray_loop(0) == -1);                   // the loop sees WM_QUIT
     CHECK(hwnd == NULL && menus_live == 0 && icons_live == 0 && !icon_present);
 }
+static void stop(void) { wintray_exit(); closed(); }
 static void ev(UINT e) { wnd_proc(W, WM_TRAY, 1, e); }
+static void left_click(void) { ev(WM_LBUTTONDOWN); ev(WM_LBUTTONUP); }
 static void second_click(void) { ev(WM_LBUTTONDBLCLK); ev(WM_LBUTTONUP); }
 static void right_click(void) { ev(WM_RBUTTONDOWN); ev(WM_RBUTTONUP); }
 
@@ -447,28 +446,26 @@ static void test_clicks(void)
 {
     printf("clicks\n");
     start(&t_cb);
-    cb_calls = 0; ev(WM_LBUTTONDOWN); ev(WM_LBUTTONUP);
+    cb_calls = 0; left_click();
     CHECK(cb_calls == 1);                           // single click
-    cb_calls = 0; ev(WM_LBUTTONDOWN); ev(WM_LBUTTONUP); ev(WM_LBUTTONDBLCLK); ev(WM_LBUTTONUP);
+    cb_calls = 0; left_click(); second_click();
     CHECK(cb_calls == 1);                           // double-click
-    cb_calls = 0; ev(WM_LBUTTONDOWN); ev(WM_LBUTTONUP); ev(WM_LBUTTONDBLCLK); ev(WM_LBUTTONUP);
-    ev(WM_LBUTTONDOWN); ev(WM_LBUTTONUP);
+    cb_calls = 0; left_click(); second_click(); left_click();
     CHECK(cb_calls == 2);                           // triple click
-    cb_calls = 0; ev(WM_LBUTTONDOWN); ev(WM_LBUTTONUP); ev(WM_LBUTTONDBLCLK);
-    ev(WM_LBUTTONDOWN); ev(WM_LBUTTONUP);
+    cb_calls = 0; left_click(); ev(WM_LBUTTONDBLCLK); left_click();
     CHECK(cb_calls == 2);                           // a DBLCLK without its UP doesn't eat the next click
-    cb_calls = 0; cb_hook = second_click; ev(WM_LBUTTONDOWN); ev(WM_LBUTTONUP);
+    cb_calls = 0; cb_hook = second_click; left_click();
     CHECK(cb_calls == 1);                           // 2nd click handled while cb shows a dialog
     cb_calls = 0; track_calls = 0; right_click();
     CHECK(cb_calls == 0 && track_calls == 1);       // right click opens the menu
     stop();
 
     start(&t_menu);
-    track_calls = 0; ev(WM_LBUTTONDOWN); ev(WM_LBUTTONUP);
+    track_calls = 0; left_click();
     CHECK(track_calls == 1);                        // no cb: left click opens the menu
-    track_calls = 0; ev(WM_LBUTTONDOWN); ev(WM_LBUTTONUP); ev(WM_LBUTTONDBLCLK); ev(WM_LBUTTONUP);
+    track_calls = 0; left_click(); second_click();
     CHECK(track_calls == 1);                        // double-click opens it once
-    track_calls = 0; track_hook = second_click; ev(WM_LBUTTONDOWN); ev(WM_LBUTTONUP);
+    track_calls = 0; track_hook = second_click; left_click();
     CHECK(track_calls == 1);                        // 2nd click arrives while the menu is open
     stop();
 }
@@ -492,26 +489,29 @@ static void test_menu(void)
     int before = menus_created;
     track_hook = hook_update; ev(WM_RBUTTONUP);
     CHECK(menus_created > before && update_pending == 0);   // rebuilt once it closed
+    before = menus_created;
     track_hook = hook_update; track_ret = ID_FIRST; item_hook = do_update; item_calls = 0;
     ev(WM_RBUTTONUP);
     CHECK(item_calls == 1 && update_pending == 0);  // item cb updates, plus a pending update
+    CHECK(menus_created == before + 1);             // rebuilt once, not twice
     track_ret = 0;
     track_hook = hook_exit; ev(WM_RBUTTONUP);       // wintray_exit() while the menu is open
-    CHECK(hwnd == NULL && hmenu == NULL && menus_live == 0 && icons_live == 0 && quit_posted == 1);
-    quit_posted = 0;
+    closed();
+    CHECK(hmenu == NULL);
 
     start(&t_menu);                                 // the "Exit" item
     track_ret = ID_FIRST + 1; item_hook = do_exit; item_calls = 0; ev(WM_RBUTTONUP);
-    CHECK(item_calls == 1 && hwnd == NULL && menus_live == 0 && icons_live == 0 && quit_posted == 1);
-    track_ret = 0; quit_posted = 0;
+    CHECK(item_calls == 1);
+    closed();
+    track_ret = 0;
 }
 
 static void on_delete(DWORD m)
 {
     if (m != NIM_DELETE)
         return;
-    ev(WM_LBUTTONDOWN); ev(WM_LBUTTONUP); ev(WM_RBUTTONUP);
-    wnd_proc(W, 0xC100, 0, 0);                      // TaskbarCreated
+    left_click(); ev(WM_RBUTTONUP);
+    wnd_proc(W, wm_taskbar_created, 0, 0);
 }
 static void test_closing(void)
 {
@@ -525,8 +525,7 @@ static void test_closing(void)
 
     start(&t_menu);                                 // closed from outside
     DestroyWindow(W);
-    CHECK(hwnd == NULL && menus_live == 0 && icons_live == 0 && quit_posted == 1);
-    quit_posted = 0;
+    closed();
     CHECK(find_class(CLASS_NAME, this_module()) != NULL);   // class still registered
     start(&t_menu);                                 // init works again
     stop();
@@ -538,8 +537,7 @@ static void test_closing(void)
     old.lpszClassName = CLASS_NAME;
     CHECK(RegisterClassW(&old) != 0);
     start(&t_menu);
-    CHECK(find_class(CLASS_NAME, this_module())->proc == wnd_proc);
-    CHECK(find_class(CLASS_NAME, mode_dll ? DLL : EXE) != NULL);
+    CHECK(find_class(CLASS_NAME, mode_dll ? DLL : EXE)->proc == wnd_proc);
     CHECK(wintray_init(&t_menu) == -1);             // already running
     stop();
     CHECK(wintray_init(NULL) == -1);
@@ -584,7 +582,7 @@ static void test_explorer(void)
     wnd_proc(W, WM_TIMER, RETRY_TIMER, 0);
     CHECK(icon_present && !retry_timer_on);         // added on retry
     icon_present = 0;
-    wnd_proc(W, 0xC100, 0, 0);
+    wnd_proc(W, wm_taskbar_created, 0, 0);
     CHECK(icon_present);                            // re-added after an Explorer restart
     stop();
 }
