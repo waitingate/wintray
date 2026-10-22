@@ -555,6 +555,9 @@ static void test_closing(void)
     start(&t_menu);                                 // closed from outside
     DestroyWindow(W);
     closed();
+    int menus = menus_created, icons = icons_created;
+    wintray_update(&t_menu);                        // without a window: does nothing
+    CHECK(menus_created == menus && icons_created == icons && !icon_present && hwnd == NULL);
     CHECK(find_class(CLASS_NAME, this_module()) != NULL);   // class still registered
     start(&t_menu);                                 // init works again
     stop();

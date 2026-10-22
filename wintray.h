@@ -20,6 +20,9 @@
 // The library keeps pointers to the wintray struct and the menu arrays, so they
 // must stay valid while the icon exists (static or global).
 //
+// wintray_update() does nothing before wintray_init() and after wintray_exit(),
+// so code that fills in the tooltip and menu may run before the icon is shown.
+//
 // Limits: one icon per process, 256 menu items, 256 submenus, 8 submenu levels,
 // 255 characters per menu item and 127 for the tooltip (longer text is cut at a
 // whole character). Windows 7 or later.

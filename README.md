@@ -298,6 +298,9 @@ struct wintray *wintray_get_instance(void); // the struct last passed to init or
   make them static or global, not local variables.
 - In menu text, `&` underlines the next letter as a shortcut key. Write `&&`
   for a real `&`.
+- `wintray_update()` does nothing before `wintray_init()` and after
+  `wintray_exit()`, so code that fills in the tooltip and menu may run before
+  the icon is shown.
 - If Explorer restarts, the icon comes back on its own.
 - `wintray_exit()` posts `WM_QUIT`, which ends every message loop on the
   thread: a `MessageBox` shown after it in the same callback closes at once.
