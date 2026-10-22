@@ -296,9 +296,11 @@ LRESULT DefWindowProcW(HWND h, UINT m, WPARAM w, LPARAM l) { (void)h; (void)m; (
 #define TASKBAR_CREATED 0xC100
 UINT RegisterWindowMessageW(LPCWSTR n) { return wsame(n, L"TaskbarCreated") ? TASKBAR_CREATED : 0xC101; }
 BOOL ChangeWindowMessageFilterEx(HWND h, UINT m, DWORD a, void *p) { (void)h; (void)m; (void)a; (void)p; return TRUE; }
+static int get_calls;
 BOOL GetMessageW(MSG *m, HWND h, UINT a, UINT b)
 {
     (void)h; (void)a; (void)b;
+    get_calls++;
     if (quit_posted) { quit_posted--; m->message = WM_QUIT; return 0; }
     m->message = WM_NULL;
     m->hwnd = NULL;
@@ -314,8 +316,9 @@ BOOL TranslateMessage(const MSG *m) { (void)m; return TRUE; }
 LRESULT DispatchMessageW(const MSG *m) { (void)m; return 0; }
 
 /* ---------------- to_wide ---------------- */
-// The version before the change, for comparison.
-static void to_wide_old(const char *s, wchar_t *out, int size)
+// The same cuts as to_wide, but it steps back one byte at a time instead of one
+// per unit too many. The reference for invalid UTF-8 and for the call count.
+static void to_wide_bytewise(const char *s, wchar_t *out, int size)
 {
     out[0] = 0;
     if (!s)
@@ -324,8 +327,11 @@ static void to_wide_old(const char *s, wchar_t *out, int size)
     if (bytes > 3 * (size - 1))
         bytes = 3 * (size - 1);
     for (;;) {
-        while (bytes > 0 && (s[bytes] & 0xC0) == 0x80)
+        int cut = bytes;
+        while (bytes > 0 && cut - bytes < 3 && (s[bytes] & 0xC0) == 0x80)
             bytes--;
+        if ((s[bytes] & 0xC0) == 0x80)
+            bytes = cut;
         int need = bytes ? MultiByteToWideChar(CP_UTF8, 0, s, bytes, NULL, 0) : 0;
         if (need <= size - 1) {
             int n = need ? MultiByteToWideChar(CP_UTF8, 0, s, bytes, out, size - 1) : 0;
@@ -389,7 +395,7 @@ static void test_to_wide(void)
             s[i] = (char)(1 + rand() % 255);
         s[len] = 0;
         to_wide(s, a, size);
-        to_wide_old(s, b, size);
+        to_wide_bytewise(s, b, size);
         bad_inv += !wsame(a, b);
         int n = 0;
         while (a[n])
@@ -402,9 +408,20 @@ static void test_to_wide(void)
     memset(s, 'a', 1000);
     s[1000] = 0;
     mb_calls = 0; to_wide(s, a, 256); long now = mb_calls;
-    mb_calls = 0; to_wide_old(s, b, 256); long was = mb_calls;
-    printf("  1000 chars cut to 255: %ld conversion calls, was %ld\n", now, was);
+    mb_calls = 0; to_wide_bytewise(s, b, 256); long bytewise = mb_calls;
+    printf("  1000 chars cut to 255: %ld conversion calls, %ld one byte at a time\n", now, bytewise);
     CHECK(now <= 2);
+    mb_calls = 0; to_wide("Exit", a, 256);
+    CHECK(mb_calls == 1);                           // shorter than the buffer: no size query
+
+    memset(s, 'x', 3);                              // invalid: "xxx" and 200 stray continuation bytes
+    memset(s + 3, 0x80, 200);
+    s[203] = 0;
+    to_wide(s, a, 128);
+    int units = 0;
+    while (a[units])
+        units++;
+    CHECK(units == 127);                            // the cut stays among the stray bytes, each one U+FFFD
 }
 
 /* ---------------- tray tests ---------------- */
@@ -436,9 +453,12 @@ static void closed_at(int line, int blocking)
 {
     int before = fails;
     CHECK(quit_posted == 1);
-    CHECK(wintray_loop(blocking) == -1);            // the loop sees WM_QUIT
-    quit_posted = 0;                                // an extra one must not fail later tests too
+    CHECK(wintray_loop(blocking) == -1 && quit_posted == 0);   // the loop takes the WM_QUIT
     CHECK(hwnd == NULL && menus_live == 0 && icons_live == 0 && !icon_present && !update_pending);
+    CHECK(!track_hook && !cb_hook && !item_hook && !notify_hook);   // every hook ran
+    quit_posted = 0;                                // a failure here must not fail later tests too
+    track_hook = cb_hook = item_hook = NULL;
+    notify_hook = NULL;
     if (fails > before)
         printf("    called from line %d\n", line);
 }
@@ -580,9 +600,10 @@ static void test_icons(void)
     CHECK(this_module() == (mode_dll ? DLL : EXE));
 }
 
-static void close_on_modify(DWORD m)
+static DWORD close_on;                              // the Shell_NotifyIconW call to close during
+static void close_during(DWORD m)
 {
-    if (m != NIM_MODIFY)
+    if (m != close_on)
         return;
     notify_hook = NULL;
     DestroyWindow(W);
@@ -601,19 +622,34 @@ static void test_explorer(void)
     CHECK(icon_present);                            // re-added after an Explorer restart
     stop();
 
-    start(&t_menu);                                 // closed while NIM_MODIFY waits for Explorer
-    notify_hook = close_on_modify;
-    wnd_proc(W, TASKBAR_CREATED, 0, 0);
-    closed();                                       // no icon added back for the closed window
-    CHECK(thread_timers == 0);                      // and no SetTimer(NULL, ...)
+    // Closed while Shell_NotifyIconW waits for Explorer: no icon may be left for the
+    // closed window, and no SetTimer(NULL, ...). Without an icon, NIM_MODIFY fails
+    // and NIM_ADD comes next; with Explorer down, NIM_ADD fails too.
+    static const struct { DWORD call; int icon, up; } cases[] = {
+        {NIM_MODIFY, 1, 1}, {NIM_ADD, 0, 1}, {NIM_ADD, 0, 0}};
+    for (int i = 0; i < 3; i++) {
+        int before = fails;
+        start(&t_menu);
+        icon_present = cases[i].icon;
+        explorer_up = cases[i].up;
+        close_on = cases[i].call;
+        notify_hook = close_during;
+        wnd_proc(W, TASKBAR_CREATED, 0, 0);
+        explorer_up = 1;
+        closed();
+        CHECK(thread_timers == 0);
+        if (fails > before)
+            printf("    in case %d\n", i);
+    }
 }
 
 static void test_loop(void)
 {
     printf("loop\n");
     start(&t_menu);
-    CHECK(wintray_loop(0) == 0);                    // nothing waiting
-    CHECK(wintray_loop(1) == 0);                    // an ordinary message
+    get_calls = 0;
+    CHECK(wintray_loop(0) == 0 && get_calls == 0);  // nothing waiting, and it doesn't wait
+    CHECK(wintray_loop(1) == 0 && get_calls == 1);  // waits in GetMessageW for a message
     wintray_exit();
     closed_at(__LINE__, 1);                         // the blocking loop sees WM_QUIT too
 }

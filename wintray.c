@@ -31,29 +31,37 @@ static UINT  menu_count;
 
 // Converts UTF-8 to UTF-16. Text that doesn't fit is cut at a character
 // boundary; out is always null-terminated.
+//
+// A UTF-16 unit takes 1 to 3 bytes. So text with fewer bytes than the buffer
+// has room for always fits, and when text doesn't fit, dropping one byte per
+// unit too many never drops more than needed.
 static void to_wide(const char *s, wchar_t *out, int size)
 {
     out[0] = 0;
     if (!s)
         return;
     int bytes = lstrlenA(s);
-    if (bytes > 3 * (size - 1))      // a UTF-16 unit never takes more than 3 bytes
+    if (bytes > 3 * (size - 1))
         bytes = 3 * (size - 1);
     for (;;) {
-        while (bytes > 0 && (s[bytes] & 0xC0) == 0x80)
-            bytes--;                 // don't split a multi-byte character
+        // Don't split a multi-byte character: its first byte is at most 3
+        // back. Further back are stray bytes of invalid text, which convert
+        // one by one, so the cut can stay.
+        int cut = bytes;
+        while (bytes > 0 && cut - bytes < 3 && (s[bytes] & 0xC0) == 0x80)
+            bytes--;
+        if ((s[bytes] & 0xC0) == 0x80)
+            bytes = cut;
         if (!bytes)
             return;
-        // Fewer bytes than the buffer has room for always fit, since a UTF-16
-        // unit takes at least one byte. Otherwise ask for the size first: what
-        // MultiByteToWideChar does with a buffer that is too small differs
-        // between Windows and Wine.
+        // What MultiByteToWideChar does with a buffer that is too small differs
+        // between Windows and Wine, so ask for the size unless it surely fits.
         int need = bytes < size ? bytes : MultiByteToWideChar(CP_UTF8, 0, s, bytes, NULL, 0);
         if (need <= size - 1) {
             out[MultiByteToWideChar(CP_UTF8, 0, s, bytes, out, size - 1)] = 0;
             return;
         }
-        bytes -= need - (size - 1);  // a UTF-16 unit takes at least one byte
+        bytes -= need - (size - 1);
     }
 }
 
@@ -126,8 +134,11 @@ static HICON load_icon(const struct wintray *t)
 static void show_icon(void)
 {
     int ok = Shell_NotifyIconW(NIM_MODIFY, &nid);
-    if (!ok && hwnd)
+    if (!ok && hwnd) {
         ok = Shell_NotifyIconW(NIM_ADD, &nid);
+        if (ok && !hwnd)             // in case Explorer added it after cleanup()'s NIM_DELETE
+            Shell_NotifyIconW(NIM_DELETE, &nid);
+    }
     if (!hwnd)
         return;
     if (ok)
