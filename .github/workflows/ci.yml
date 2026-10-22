@@ -5,6 +5,7 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15                 # a run takes about 2 minutes; without a limit a hung step runs 6 hours
     steps:
       - uses: actions/checkout@v4
       - name: Install MinGW-w64
