@@ -42,9 +42,10 @@ static int can_start(unsigned v, int j, int k, unsigned min)
     return hi >= min && lo <= 0x10FFFF && !(lo >= 0xD800 && hi <= 0xDFFF);
 }
 
-// Strict UTF-8 decoder. A broken or cut-off sequence becomes one U+FFFD for the
-// longest start of it that a character could have (at least one byte), as
-// Windows does with a cut-off character; a stray byte becomes one of its own.
+// Strict UTF-8 decoder that splits invalid text the way Windows does. A cut-off
+// sequence becomes one U+FFFD for the longest start of it that a character could
+// have (at least one byte), a lead byte followed by a continuation byte that no
+// character can have becomes one for both, and a stray byte becomes one of its own.
 static int dec(const unsigned char *s, int n, int i, unsigned *cp)
 {
     unsigned c = s[i], min;
@@ -62,7 +63,7 @@ static int dec(const unsigned char *s, int n, int i, unsigned *cp)
             return j;
         unsigned v = c << 6 | (s[i + j] & 0x3F);
         if (!can_start(v, j + 1, k, min))
-            return j;
+            return j + 1;
         c = v;
     }
     *cp = c;
@@ -288,8 +289,11 @@ BOOL Shell_NotifyIconW(DWORD m, NOTIFYICONDATAW *d)
         ghosts++;                           // icon added or changed for a closing window
     if (explorer == DOWN)
         return FALSE;
-    if (m == NIM_ADD)
+    if (m == NIM_ADD) {
+        if (icon_present)
+            return FALSE;                   // already there
         icon_present = 1;
+    }
     return icon_present && explorer == UP;
 }
 
@@ -454,9 +458,12 @@ static void closed_at(int line, int blocking)
     CHECK(hwnd == NULL && menus_live == 0 && icons_live == 0 && !icon_present && !update_pending);
     CHECK(!track_hook && !cb_hook && !item_hook && !notify_hook);   // every hook ran
     CHECK(thread_timers == 0);                      // no SetTimer(NULL, ...)
-    quit_posted = thread_timers = 0;                // a failure here must not fail later tests too
+    // A failure here must not fail later tests too.
     track_hook = cb_hook = item_hook = notify_hook = NULL;
     notify_on = NO_CALL;
+    if (hwnd)
+        wintray_exit();                             // or every later start() fails
+    quit_posted = thread_timers = 0;
     if (fails > before)
         printf("    called from line %d\n", line);
 }
@@ -611,7 +618,8 @@ static void test_explorer(void)
     stop();
 
     // Closed while Shell_NotifyIconW waits for Explorer: no icon may be left for the
-    // closed window, and no SetTimer(NULL, ...). Without an icon, NIM_MODIFY fails
+    // closed window, no further call may add or change one for it (ghosts), and no
+    // SetTimer(NULL, ...). Without an icon, NIM_MODIFY fails
     // and NIM_ADD comes next. With Explorer down, NIM_ADD fails too; with Explorer
     // slow, it reports a timeout but the icon is added anyway.
     static const struct { DWORD call; int state; } cases[] = {
@@ -621,10 +629,12 @@ static void test_explorer(void)
         start(&t_menu);
         icon_present = cases[i].call == NIM_MODIFY;
         explorer = cases[i].state;
+        ghosts = 0;
         notify_on = cases[i].call; notify_hook = close_window;
         wnd_proc(W, TASKBAR_CREATED, 0, 0);
         explorer = UP;
         closed();
+        CHECK(ghosts == 1);                         // only the call that was waiting
         if (fails > before)
             printf("    in case %d\n", i);
     }
