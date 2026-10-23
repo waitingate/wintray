@@ -6,12 +6,18 @@ on:
     branches: [main]
   pull_request:
 
+# The jobs only read the code: a read-only token, which checkout doesn't keep.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 15                 # a run takes about 2 minutes; without a limit a hung step runs 6 hours
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Install MinGW-w64
         timeout-minutes: 12
         run: |
@@ -45,6 +51,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Run the tests
         run: |
           sudo sysctl vm.mmap_rnd_bits=28   # AddressSanitizer fails with more on newer kernels
