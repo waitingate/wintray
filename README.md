@@ -363,7 +363,8 @@ Tested with MinGW-w64 GCC 13.2 (WinLibs), with the test programs running under
 Wine.
 
 On Linux, `sh test/run.sh` tests the library against fake Win32 functions,
-including clicks at awkward moments. GitHub Actions runs it on every push.
+including clicks at awkward moments. GitHub Actions runs it for every push to
+main and every pull request.
 The same tests also build on Windows with MinGW, without AddressSanitizer:
 
 ```

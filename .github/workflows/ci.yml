@@ -1,23 +1,41 @@
 name: CI
 
-on: [push, pull_request]
+# Tags are left out: a tag points at a commit that already ran on main.
+on:
+  push:
+    branches: [main]
+  pull_request:
 
 jobs:
-  test:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 15                 # a run takes about 2 minutes; without a limit a hung step runs 6 hours
     steps:
       - uses: actions/checkout@v4
       - name: Install MinGW-w64
-        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64
+        timeout-minutes: 10
+        run: |
+          # Only the two compilers the build uses, with retries for a slow mirror.
+          # The man-db update after installing can take minutes here and isn't needed.
+          sudo rm -f /var/lib/man-db/auto-update
+          apt="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30"
+          $apt update
+          $apt install -y --no-install-recommends gcc-mingw-w64-x86-64-win32 gcc-mingw-w64-i686-win32
       - name: Build for Windows, 64 and 32 bit
         run: |
           for t in x86_64 i686; do
-            $t-w64-mingw32-gcc -std=c99 -Os -Wall -Wextra -Wpedantic -Werror -c wintray.c -o wintray-$t.o
+            $t-w64-mingw32-gcc-win32 -std=c99 -Os -Wall -Wextra -Wpedantic -Werror -c wintray.c -o wintray-$t.o
             # No C runtime: the object must link with nothing but these three Windows DLLs.
             # (ld warns that the DLL has no entry point; nothing ever runs it.)
-            $t-w64-mingw32-gcc -shared -nostdlib -o wintray-$t.dll wintray-$t.o -lkernel32 -luser32 -lshell32
+            $t-w64-mingw32-gcc-win32 -shared -nostdlib -o wintray-$t.dll wintray-$t.o -lkernel32 -luser32 -lshell32
           done
+
+  # The logic tests need only the runner's own gcc, so they don't wait for MinGW.
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
       - name: Run the tests
         run: |
           sudo sysctl vm.mmap_rnd_bits=28   # AddressSanitizer fails with more on newer kernels
