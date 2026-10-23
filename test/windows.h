@@ -33,6 +33,7 @@ typedef struct {
 #define WM_NULL          0x0000
 #define WM_DESTROY       0x0002
 #define WM_QUIT          0x0012
+#define WM_NCDESTROY     0x0082
 #define WM_TIMER         0x0113
 #define WM_LBUTTONDOWN   0x0201
 #define WM_LBUTTONUP     0x0202
@@ -44,6 +45,7 @@ typedef struct {
 #define ARRAYSIZE(a)     (sizeof(a) / sizeof((a)[0]))
 #define MAKEINTRESOURCEW(i) ((LPCWSTR)(uintptr_t)(unsigned short)(i))
 #define CP_UTF8          65001
+#define MB_ERR_INVALID_CHARS 0x0008
 #define MF_STRING        0x0000
 #define MF_GRAYED        0x0001
 #define MF_CHECKED       0x0008
@@ -59,6 +61,7 @@ typedef struct {
 #define TPM_RETURNCMD    0x0100
 #define PM_REMOVE        0x0001
 #define MSGFLT_ALLOW     1
+#define CS_NOCLOSE       0x0200
 #define GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT 0x2
 #define GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS       0x4
 

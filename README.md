@@ -85,6 +85,11 @@ Or load it from a file at run time with `.icon_filepath`. Give the full path,
 such as `"C:\\Tools\\icon.ico"`: the program doesn't always start in its own
 folder.
 
+If the icon can't be loaded, the tray shows the standard icon, and wintray
+reports no error. That happens with an `icon_id` that isn't in the program, a
+missing file, and a path longer than 259 UTF-16 units or not valid UTF-8: such
+a path is never cut short, so it can't name another file.
+
 ## Examples
 
 Each example with a `main()` is a complete program; build it like the quick
@@ -320,6 +325,13 @@ struct wintray *wintray_get_instance(void);
   until the next `wintray_init()`. So code that fills in the tooltip and menu
   may run before the icon is shown, on the thread that will call
   `wintray_init()`.
+- The menu on screen stays as it is while it is open: `wintray_update()` waits
+  until it closes. If an update meanwhile gives an item another `text` or
+  `cb`, or changes its `checked` or `disabled`, a click on that item is
+  ignored, since it was meant for what the menu showed.
+- While a callback shows a dialog or message box, the icon keeps working:
+  another click calls `cb` again, inside the first call, and the menu still
+  opens. Use a flag if a callback must not run twice at once.
 - If Explorer restarts, the icon comes back on its own.
 - `wintray_exit()` posts `WM_QUIT`, which ends every message loop on the
   thread: a `MessageBox` shown after it in the same callback closes at once.
@@ -329,9 +341,13 @@ struct wintray *wintray_get_instance(void);
   stays. Call `wintray_exit()` to remove it. That posts one more `WM_QUIT`,
   so before a new `wintray_init()`, call `wintray_loop()` once more: it
   returns -1 at once.
-- In a DLL, run wintray on its own thread, since `wintray_exit()` posts
-  `WM_QUIT`, and call `wintray_exit()` before the DLL is unloaded.
-- With other compilers, add `wintray.c` to your project and link `user32` and
+- In a DLL, run wintray on a thread of its own, since `wintray_exit()` posts
+  `WM_QUIT`. Stop it before the DLL is unloaded, and not from `DllMain`:
+  `wintray_exit()` works only on the wintray thread. Post `WM_QUIT` to that
+  thread (`PostThreadMessageW`), call `wintray_exit()` there once
+  `wintray_loop()` returns -1, and wait for the thread to end.
+- wintray needs C99 or later; the header also works from C++. With other
+  compilers, add `wintray.c` to your project and link `user32` and
   `shell32`, and `kernel32` if your project leaves out the default libraries.
   I haven't tried MSVC yet. Without the C runtime, turn off its checks that
   call into the runtime: `/GS-`, and in a new Visual Studio project also the
@@ -342,8 +358,9 @@ struct wintray *wintray_get_instance(void);
 
 One icon per program, up to 256 menu items and 256 submenus (8 levels deep),
 255 characters per menu item and 127 for the tooltip, counted in UTF-16 units:
-an emoji counts as two. Longer text is cut between characters, which can split
-an emoji made of several, such as a flag. Windows 7 or later.
+most emoji count as two. Longer text is cut between characters, which can
+split an emoji made of several, such as a flag. An icon file path can have up
+to 259 units; a longer one isn't cut, it loads no icon. Windows 7 or later.
 
 ## Coming from zserge/tray or dmikushin/tray
 

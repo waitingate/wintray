@@ -24,14 +24,19 @@ static int mode_dll, mode_gmh_fail, gmh_calls;
 HMODULE GetModuleHandleW(LPCWSTR n) { (void)n; return EXE; }
 BOOL GetModuleHandleExW(DWORD f, LPCWSTR a, HMODULE *m)
 {
-    (void)f; (void)a;
+    (void)a;
     gmh_calls++;
-    *m = mode_gmh_fail ? NULL : mode_dll ? DLL : EXE;
+    // Without FROM_ADDRESS, a would be read as a module name, and without
+    // UNCHANGED_REFCOUNT the DLL could never be unloaded.
+    int flags_ok = f == (GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT);
+    *m = mode_gmh_fail || !flags_ok ? NULL : mode_dll ? DLL : EXE;
     return *m != NULL;
 }
 
 /* ---------------- strings ---------------- */
 int lstrlenA(LPCSTR s) { return s ? (int)strlen(s) : 0; }
+static int wsame(LPCWSTR a, LPCWSTR b) { while (*a && *a == *b) a++, b++; return *a == *b; }
+static int wlen(LPCWSTR s) { int n = 0; while (s[n]) n++; return n; }
 
 // Whether a valid code point of a k-byte sequence starts with the bits in v,
 // which come from its first j bytes.
@@ -96,11 +101,30 @@ static int utf8_to_16(const char *src, int n, wchar_t *out, int max, int *used)
     return units;
 }
 
+// Whether the text is valid UTF-8. The decoder gives U+FFFD for invalid bytes,
+// and for valid text only as the three bytes of U+FFFD itself.
+static int valid_utf8(const char *src, int n)
+{
+    const unsigned char *s = (const unsigned char *)src;
+    for (int i = 0; i < n; ) {
+        unsigned c;
+        int k = dec(s, n, i, &c);
+        if (c == 0xFFFD && !(k == 3 && s[i] == 0xEF))
+            return 0;
+        i += k;
+    }
+    return 1;
+}
+
 static long mb_calls;
 int MultiByteToWideChar(UINT cp, DWORD fl, LPCSTR src, int n, wchar_t *out, int outn)
 {
-    (void)cp; (void)fl;
+    (void)cp;
     mb_calls++;
+    if (n == -1)
+        n = (int)strlen(src) + 1;           // the terminator is converted too
+    if ((fl & MB_ERR_INVALID_CHARS) && !valid_utf8(src, n))
+        return 0;                           // ERROR_NO_UNICODE_TRANSLATION
     // Without out, n is enough: no character gives more units than bytes.
     int used, units = utf8_to_16(src, n, out, out ? outn : n, &used);
     return used < n ? 0 : units;            // 0 when the buffer is too small
@@ -110,7 +134,11 @@ int MultiByteToWideChar(UINT cp, DWORD fl, LPCSTR src, int n, wchar_t *out, int 
 #define MAXM 200000
 static int m_live[MAXM], m_parent[MAXM];
 static int menus_created, menus_live, on_screen;
-static int n_popups, n_leaves, last_leaf_id;
+static int n_popups, n_leaves, n_separators, last_leaf_id;
+// What AppendMenuW got for each command ID, and the text length of each
+// submenu's item (-1 for no text).
+static UINT got_flags[ID_FIRST + MAX_ITEMS];
+static int got_len[ID_FIRST + MAX_ITEMS], sub_len[MAXM];
 HMENU CreatePopupMenu(void)
 {
     int id = ++menus_created;
@@ -120,13 +148,18 @@ HMENU CreatePopupMenu(void)
 }
 BOOL AppendMenuW(HMENU m, UINT f, UINT_PTR id, LPCWSTR t)
 {
-    (void)t;
-    int mi = (int)(uintptr_t)m;
+    int mi = (int)(uintptr_t)m, len = t ? wlen(t) : -1;
     CHECK(m_live[mi]);
     if (f & MF_POPUP) {
         m_parent[(int)id] = mi;
+        sub_len[(int)id] = len;
         n_popups++;
-    } else if (!(f & MF_SEPARATOR)) {
+    } else if (f & MF_SEPARATOR) {
+        n_separators++;
+    } else {
+        CHECK(id >= ID_FIRST && id < ID_FIRST + MAX_ITEMS);
+        got_flags[id] = f;
+        got_len[id] = len;
         n_leaves++;
         last_leaf_id = (int)id;
     }
@@ -157,17 +190,22 @@ BOOL DestroyMenu(HMENU m)
 }
 static void (*track_hook)(void);
 static int track_calls, track_ret, end_menu_called;
+static HWND foreground;
 BOOL TrackPopupMenu(HMENU m, UINT f, int x, int y, int r, HWND h, const void *rc)
 {
-    (void)f; (void)x; (void)y; (void)r; (void)rc;
+    (void)x; (void)y; (void)r; (void)rc;
     track_calls++;
     CHECK(!on_screen);                      // never two menus at once
     CHECK(h != NULL && m != NULL);
+    CHECK(foreground == h);                 // or the menu stays when the user clicks elsewhere
     on_screen = (int)(uintptr_t)m;
     end_menu_called = 0;
     run_hook(&track_hook);                  // things that happen while the menu is open
     on_screen = 0;
-    return end_menu_called ? 0 : track_ret;
+    foreground = NULL;                      // so the next menu needs it again
+    if (end_menu_called)
+        return 0;
+    return f & TPM_RETURNCMD ? track_ret : TRUE;   // without it, only success or failure
 }
 BOOL EndMenu(void) { end_menu_called = 1; return TRUE; }
 
@@ -175,19 +213,25 @@ BOOL EndMenu(void) { end_menu_called = 1; return TRUE; }
 #define SHARED ((HICON)(uintptr_t)0xABCDE0)
 static int i_live[MAXM], icons_created, icons_live;
 static int icon_in_dll, icon_in_exe = 1, from_dll, from_exe;
+static int last_res, file_loads, last_path_len;   // the resource ID last loaded, and the files
 HANDLE LoadImageW(HINSTANCE h, LPCWSTR name, UINT type, int cx, int cy, UINT fl)
 {
-    (void)type; (void)cx; (void)cy;
-    int ok = 0;
+    (void)type;
+    CHECK(cx == 16 && cy == 16);            // the small icon size
+    int ok = 0, res = (int)(uintptr_t)name;
     if (fl & LR_LOADFROMFILE) {
+        file_loads++;
+        last_path_len = wlen(name);
         ok = name[0] == 'g';                // "good.ico" exists
     } else if (h == DLL) {
-        ok = icon_in_dll;
+        ok = icon_in_dll && res == 1;       // the DLL has icon 1
         from_dll += ok;
     } else if (h == EXE) {
-        ok = icon_in_exe;
+        ok = icon_in_exe && (res == 1 || res == 2);   // the exe has icons 1 and 2
         from_exe += ok;
     }
+    if (ok && !(fl & LR_LOADFROMFILE))
+        last_res = res;
     if (!ok)
         return NULL;
     int id = ++icons_created;
@@ -212,10 +256,17 @@ BOOL DestroyIcon(HICON i)
 int GetSystemMetrics(int i) { (void)i; return 16; }
 
 /* ---------------- classes and windows ---------------- */
-struct cls { int used; LPCWSTR name; HINSTANCE inst; WNDPROC proc; int windows; };
+// Messages that only the fakes and tests use.
+#define WM_CREATE          0x0001
+#define WM_CLOSE           0x0010
+#define WM_QUERYENDSESSION 0x0011
+#define WM_NCCREATE        0x0081
+#define WM_SYSKEYDOWN      0x0104
+#define WM_SYSCOMMAND      0x0112
+#define SC_CLOSE           0xF060
+#define VK_F4              0x73
+struct cls { int used; LPCWSTR name; HINSTANCE inst; WNDPROC proc; UINT style; int windows; };
 static struct cls classes[8];
-static int wsame(LPCWSTR a, LPCWSTR b) { while (*a && *a == *b) a++, b++; return *a == *b; }
-static int wlen(LPCWSTR s) { int n = 0; while (s[n]) n++; return n; }
 static struct cls *find_class(LPCWSTR name, HINSTANCE inst)
 {
     for (int i = 0; i < (int)ARRAYSIZE(classes); i++)
@@ -229,7 +280,7 @@ unsigned short RegisterClassW(const WNDCLASSW *wc)
         return 0;                           // ERROR_CLASS_ALREADY_EXISTS
     for (int i = 0; i < (int)ARRAYSIZE(classes); i++)
         if (!classes[i].used) {
-            classes[i] = (struct cls){1, wc->lpszClassName, wc->hInstance, wc->lpfnWndProc, 0};
+            classes[i] = (struct cls){1, wc->lpszClassName, wc->hInstance, wc->lpfnWndProc, wc->style, 0};
             return (unsigned short)(i + 1);
         }
     return 0;
@@ -242,33 +293,44 @@ BOOL UnregisterClassW(LPCWSTR name, HINSTANCE inst)
     c->used = 0;
     return TRUE;
 }
-struct win { int alive; struct cls *c; };  // alive until DestroyWindow starts
+struct win { int alive, dying; struct cls *c; };   // alive until DestroyWindow starts
 static struct win wins[1000];
 static int nwins;
 static HWND timer_hwnd;                     // the window timer that is set, if any
 static UINT_PTR timer_id;
 #define WIN(h) wins[(uintptr_t)(h) / 16]
+static int fail_create;                     // CreateWindowW fails, as when out of resources
 HWND CreateWindowW(LPCWSTR cls, LPCWSTR title, DWORD st, int x, int y, int w, int h,
                    HWND parent, HMENU menu, HINSTANCE inst, void *param)
 {
     (void)title; (void)st; (void)x; (void)y; (void)w; (void)h; (void)parent; (void)menu; (void)param;
     struct cls *c = find_class(cls, inst);
-    if (!c)
+    if (!c || fail_create)
         return NULL;
     HWND hw = (HWND)(uintptr_t)(++nwins * 16);
-    WIN(hw) = (struct win){1, c};
+    WIN(hw) = (struct win){1, 0, c};
     c->windows++;
-    c->proc(hw, 0x0081, 0, 0);              // WM_NCCREATE
-    c->proc(hw, 0x0001, 0, 0);              // WM_CREATE
+    if (!c->proc(hw, WM_NCCREATE, 0, 0)) {  // FALSE: no window
+        WIN(hw).alive = 0;
+        c->windows--;
+        return NULL;
+    }
+    if (c->proc(hw, WM_CREATE, 0, 0) == -1) {
+        DestroyWindow(hw);
+        return NULL;
+    }
     return hw;
 }
 BOOL DestroyWindow(HWND hw)
 {
+    CHECK(!WIN(hw).dying);                  // not again while it is being destroyed
     if (!WIN(hw).alive)
         return FALSE;
     WIN(hw).alive = 0;
+    WIN(hw).dying = 1;
     WIN(hw).c->proc(hw, WM_DESTROY, 0, 0);
-    WIN(hw).c->proc(hw, 0x0082, 0, 0);      // WM_NCDESTROY
+    WIN(hw).c->proc(hw, WM_NCDESTROY, 0, 0);
+    WIN(hw).dying = 0;
     WIN(hw).c->windows--;
     if (timer_hwnd == hw)
         timer_hwnd = NULL;                  // a window's timers go with it
@@ -279,7 +341,7 @@ BOOL DestroyWindow(HWND hw)
 // Explorer keeps icons by window and ID, and works on a copy of the request
 // taken when the call starts, before the messages handled while it waits.
 static enum { DOWN, UP, SLOW } explorer = UP;   // SLOW: does the work, but reports a timeout
-static struct { HWND hwnd; UINT uid; } shown[8];   // the icons in the tray
+static struct { HWND hwnd; UINT uid, cbmsg; HICON icon; wchar_t tip[128]; } shown[8];   // the icons in the tray
 static int nshown, ghosts, notify_calls;
 #define NO_CALL ((DWORD)-1)
 static DWORD notify_on = NO_CALL;           // the call during which notify_hook runs
@@ -296,6 +358,7 @@ BOOL Shell_NotifyIconW(DWORD m, NOTIFYICONDATAW *d)
 {
     NOTIFYICONDATAW r = *d;
     notify_calls++;
+    CHECK(r.cbSize == sizeof r);
     if (m == notify_on)
         run_hook(&notify_hook);             // messages handled while it waits for Explorer
     int i = find_icon(r.hWnd, r.uID);
@@ -313,23 +376,34 @@ BOOL Shell_NotifyIconW(DWORD m, NOTIFYICONDATAW *d)
             return FALSE;                   // already there
         CHECK(nshown < (int)ARRAYSIZE(shown));
         i = nshown++;
+        memset(&shown[i], 0, sizeof shown[i]);
         shown[i].hwnd = r.hWnd;
         shown[i].uid = r.uID;
+    }
+    if (i >= 0) {                           // only the members the flags name
+        if (r.uFlags & NIF_MESSAGE)
+            shown[i].cbmsg = r.uCallbackMessage;
+        if (r.uFlags & NIF_ICON)
+            shown[i].icon = r.hIcon;
+        if (r.uFlags & NIF_TIP)
+            memcpy(shown[i].tip, r.szTip, sizeof r.szTip);
     }
     return i >= 0 && explorer == UP;
 }
 
 /* ---------------- the rest ---------------- */
 static int thread_timers, quit_posted;
+static UINT timer_ms;
 UINT_PTR SetTimer(HWND h, UINT_PTR id, UINT ms, void *f)
 {
-    (void)ms; (void)f;
+    (void)f;
     if (!h) {
         thread_timers++;
         return 99;
     }
     timer_hwnd = h;
     timer_id = id;
+    timer_ms = ms;
     return id;
 }
 BOOL KillTimer(HWND h, UINT_PTR id)
@@ -340,31 +414,61 @@ BOOL KillTimer(HWND h, UINT_PTR id)
     return TRUE;
 }
 BOOL GetCursorPos(POINT *p) { p->x = p->y = 0; return TRUE; }
-BOOL SetForegroundWindow(HWND h) { (void)h; return TRUE; }
-BOOL PostMessageW(HWND h, UINT m, WPARAM w, LPARAM l) { (void)h; (void)m; (void)w; (void)l; return TRUE; }
+BOOL SetForegroundWindow(HWND h) { foreground = h; return TRUE; }
+static int nulls_posted;
+BOOL PostMessageW(HWND h, UINT m, WPARAM w, LPARAM l) { (void)w; (void)l; nulls_posted += h && m == WM_NULL; return TRUE; }
 void PostQuitMessage(int c) { (void)c; quit_posted++; }
-LRESULT DefWindowProcW(HWND h, UINT m, WPARAM w, LPARAM l) { (void)h; (void)m; (void)w; (void)l; return 0; }
+// What Windows does with the messages wintray leaves to it. Alt+F4 is as in
+// Wine, which closes the window unless its class has CS_NOCLOSE; Windows 11
+// ignores Alt+F4 for this window either way. Wine posts the SC_CLOSE; here it
+// comes at once.
+LRESULT DefWindowProcW(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    if (m == WM_NCCREATE || m == WM_QUERYENDSESSION)
+        return TRUE;                        // go on creating the window; the session may end
+    if (m == WM_SYSKEYDOWN && w == VK_F4 && (l & 1 << 29) && !(WIN(h).c->style & CS_NOCLOSE))
+        return WIN(h).c->proc(h, WM_SYSCOMMAND, SC_CLOSE, 0);   // Alt+F4
+    if (m == WM_SYSCOMMAND && (w & 0xFFF0) == SC_CLOSE)
+        return WIN(h).c->proc(h, WM_CLOSE, 0, 0);
+    if (m == WM_CLOSE)
+        DestroyWindow(h);
+    return 0;
+}
 #define TASKBAR_CREATED 0xC100
 UINT RegisterWindowMessageW(LPCWSTR n) { return wsame(n, L"TaskbarCreated") ? TASKBAR_CREATED : 0xC101; }
-BOOL ChangeWindowMessageFilterEx(HWND h, UINT m, DWORD a, void *p) { (void)h; (void)m; (void)a; (void)p; return TRUE; }
-static int get_calls;
+static HWND filter_hwnd;                    // the window and message let through UIPI
+static UINT filter_msg;
+BOOL ChangeWindowMessageFilterEx(HWND h, UINT m, DWORD a, void *p)
+{
+    (void)p;
+    if (a == MSGFLT_ALLOW) {
+        filter_hwnd = h;
+        filter_msg = m;
+    }
+    return TRUE;
+}
+static int get_calls, dispatched;
+static MSG pending;                         // a posted message, unless WM_NULL
+static int matches(HWND filter) { return pending.message && (!filter || filter == pending.hwnd); }
 BOOL GetMessageW(MSG *m, HWND h, UINT a, UINT b)
 {
-    (void)h; (void)a; (void)b;
+    (void)a; (void)b;
     get_calls++;
     if (quit_posted) { quit_posted--; m->message = WM_QUIT; return 0; }
-    m->message = WM_NULL;
+    if (matches(h)) { *m = pending; pending.message = WM_NULL; return 1; }
+    m->message = WM_NULL;                   // a message wintray has nothing to do with
     m->hwnd = NULL;
     return 1;
 }
 BOOL PeekMessageW(MSG *m, HWND h, UINT a, UINT b, UINT r)
 {
-    (void)h; (void)a; (void)b; (void)r;
-    if (quit_posted) { quit_posted--; m->message = WM_QUIT; return 1; }
+    (void)a; (void)b;
+    if (quit_posted) { quit_posted -= (r & PM_REMOVE) != 0; m->message = WM_QUIT; return 1; }
+    if (matches(h)) { *m = pending; if (r & PM_REMOVE) pending.message = WM_NULL; return 1; }
     return 0;
 }
 BOOL TranslateMessage(const MSG *m) { (void)m; return TRUE; }
-LRESULT DispatchMessageW(const MSG *m) { (void)m; return 0; }
+LRESULT DispatchMessageW(const MSG *m) { dispatched += m->message != WM_NULL; return 0; }
 
 /* ---------------- to_wide ---------------- */
 // Expected result: the longest run of whole characters that fits, split the way
@@ -466,9 +570,10 @@ static void tray_cb(struct wintray *t)
     cb_calls++;
     run_hook(&cb_hook);
 }
+static struct wintray_menu_item *last_item;    // the item the last item_cb got
 static void item_cb(struct wintray_menu_item *m)
 {
-    (void)m;
+    last_item = m;
     item_calls++;
     run_hook(&item_hook);
 }
@@ -519,7 +624,13 @@ static void update_without_window_at(int line)
         printf("    called from line %d\n", line);
 }
 #define update_without_window() update_without_window_at(__LINE__)
-static void ev(UINT e) { wnd_proc(W, WM_TRAY, 1, e); }
+// A click, as Explorer sends it: with the callback message the icon was given.
+static void ev(UINT e)
+{
+    int i = find_icon(W, 1);
+    CHECK(i >= 0);
+    wnd_proc(W, i >= 0 ? shown[i].cbmsg : 0, 1, e);
+}
 static void left_click(void) { ev(WM_LBUTTONDOWN); ev(WM_LBUTTONUP); }
 static void second_click(void) { ev(WM_LBUTTONDBLCLK); ev(WM_LBUTTONUP); }
 static void right_click(void) { ev(WM_RBUTTONDOWN); ev(WM_RBUTTONUP); }
@@ -562,6 +673,27 @@ static void hook_update(void)
 static void hook_exit(void) { wintray_exit(); CHECK(end_menu_called && hwnd == NULL); }
 static void do_update(void) { wintray_update(g_tray); }
 
+static struct wintray_menu_item sub1[] = {{"Inner", 0, 0, item_cb, NULL}, {NULL, 0, 0, NULL, NULL}};
+static struct wintray_menu_item flagm[] = {
+    {"Off", 1, 0, item_cb, NULL}, {"On", 0, 1, item_cb, NULL}, {"-x", 0, 0, item_cb, NULL},
+    {"Info", 0, 0, NULL, NULL}, {"Sub", 0, 0, NULL, sub1}, {NULL, 0, 0, NULL, NULL}};
+static struct wintray t_flags = {NULL, "t", NULL, flagm, 1};
+
+// Items changed in place while the menu is open, then an update, as a timer may do.
+static struct wintray_menu_item dyn[] = {
+    {"A", 0, 0, item_cb, NULL}, {"B", 0, 0, item_cb, NULL}, {NULL, 0, 0, NULL, NULL}};
+static struct wintray t_dyn = {NULL, "t", NULL, dyn, 1};
+static int other_calls;
+static void other_cb(struct wintray_menu_item *m) { (void)m; other_calls++; }
+static void rename_a(void) { dyn[0].text = "X"; wintray_update(&t_dyn); }
+static void recall_a(void) { dyn[0].cb = other_cb; wintray_update(&t_dyn); }
+static void gray_a(void) { dyn[0].disabled = 1; wintray_update(&t_dyn); }
+static void reset_dyn(void)
+{
+    dyn[0] = (struct wintray_menu_item){"A", 0, 0, item_cb, NULL};
+    wintray_update(&t_dyn);
+}
+
 static void test_menu(void)
 {
     printf("menu\n");
@@ -587,6 +719,45 @@ static void test_menu(void)
     CHECK(item_calls == 1);
     closed();
     track_ret = 0;
+
+    start(&t_menu);                                 // the item chosen is the one called
+    track_ret = ID_FIRST + 1; last_item = NULL; nulls_posted = 0;
+    right_click();
+    CHECK(last_item == &menu1[2] && nulls_posted == 1);   // "Exit", and WM_NULL after the menu
+    track_ret = 0;
+    stop();
+
+    n_separators = 0;
+    start(&t_flags);                                // what each item looks like
+    CHECK(got_flags[ID_FIRST] == MF_GRAYED && got_flags[ID_FIRST + 1] == MF_CHECKED);
+    CHECK(got_flags[ID_FIRST + 2] == MF_STRING && n_separators == 0);   // "-x" is an item
+    CHECK(got_len[ID_FIRST] == 3 && got_len[ID_FIRST + 2] == 2 && sub_len[menus_created] == 3);
+    track_ret = ID_FIRST + 3; item_calls = 0;
+    right_click();                                  // an item without a callback
+    CHECK(item_calls == 0);
+    track_ret = 0;
+    stop();
+
+    // A click on an item that changed while the menu was open is dropped, since
+    // the user clicked what it was before. One that didn't change still counts.
+    start(&t_dyn);
+    item_calls = other_calls = 0;
+    track_hook = rename_a; track_ret = ID_FIRST; right_click();
+    CHECK(item_calls == 0);                         // "A" was clicked, but it says "X" now
+    reset_dyn();
+    track_hook = rename_a; track_ret = ID_FIRST + 1; right_click();
+    CHECK(item_calls == 1 && last_item == &dyn[1]); // "B" stayed the same
+    reset_dyn();
+    track_hook = recall_a; track_ret = ID_FIRST; right_click();
+    CHECK(item_calls == 1 && other_calls == 0);     // another callback now
+    reset_dyn();
+    track_hook = gray_a; track_ret = ID_FIRST; right_click();
+    CHECK(item_calls == 1);                         // grayed out meanwhile
+    reset_dyn();
+    track_ret = ID_FIRST; right_click();
+    CHECK(item_calls == 2);                         // no update while it was open
+    track_ret = 0;
+    stop();
 }
 
 static void on_delete(void)
@@ -594,6 +765,7 @@ static void on_delete(void)
     left_click(); right_click();
     wnd_proc(W, TASKBAR_CREATED, 0, 0);
 }
+static void exit_again(void) { wintray_exit(); CHECK(wintray_init(&t_menu) == -1); }
 static void test_closing(void)
 {
     printf("closing\n");
@@ -605,7 +777,8 @@ static void test_closing(void)
     update_without_window();                        // after wintray_exit()
 
     start(&t_menu);                                 // closed from outside
-    DestroyWindow(W);
+    wnd_proc(W, WM_CLOSE, 0, 0);                    // as taskkill without /f sends it
+    CHECK(window == NULL);                          // forgotten once it is really gone
     closed();
     update_without_window();                        // after the window was closed
     CHECK(find_class(CLASS_NAME, this_module()) != NULL);   // class still registered
@@ -624,6 +797,33 @@ static void test_closing(void)
     CHECK(wintray_init(&t_menu) == -1);             // already running
     stop();
     CHECK(wintray_init(NULL) == -1);
+
+    start(&t_menu);
+    CHECK(wnd_proc(W, WM_QUERYENDSESSION, 0, 0) != 0);   // doesn't hold up a shutdown
+    right_click();                                  // Alt+F4 after the menu, which leaves
+    wnd_proc(W, WM_SYSKEYDOWN, VK_F4, (LPARAM)1 << 29);   // the keyboard focus here
+    CHECK(hwnd == W && nshown == 1 && quit_posted == 0);   // doesn't close it
+    stop();
+
+    start(&t_menu);                                 // a WM_DESTROY from another program,
+    wnd_proc(W, WM_DESTROY, 0, 0);                  // with no DestroyWindow behind it
+    CHECK(WIN(W).alive && hwnd == NULL && nshown == 0);
+    wintray_exit();                                 // still destroys the window
+    CHECK(!WIN(W).alive && find_class(CLASS_NAME, this_module()) == NULL);
+    closed();
+    start(&t_menu);
+    wnd_proc(W, WM_DESTROY, 0, 0);
+    closed();
+    start(&t_menu);                                 // or the next init does
+    stop();
+
+    start(&t_menu);                                 // exit and init again while the
+    notify_on = NIM_DELETE; notify_hook = exit_again;   // window is being destroyed
+    stop();
+
+    fail_create = 1;                                // no window: init fails cleanly
+    CHECK(wintray_init(&t_menu) == -1 && hwnd == NULL);
+    fail_create = 0;
 }
 
 static void test_icons(void)
@@ -646,7 +846,20 @@ static void test_icons(void)
     CHECK(icon_owned);
     t.icon_filepath = "bad.ico"; wintray_update(&t);
     CHECK(nid.hIcon == SHARED);
-    t.icon_id = 1; icon_in_exe = 1;
+    static char path[MAX_PATH + 1];                 // a path is used whole or not at all:
+    memset(path, 'g', MAX_PATH - 1);                // the longest that fits
+    file_loads = 0; t.icon_filepath = path; wintray_update(&t);
+    CHECK(file_loads == 1 && last_path_len == MAX_PATH - 1 && icon_owned);
+    path[MAX_PATH - 1] = 'g';                       // one unit longer: not cut short
+    wintray_update(&t);
+    CHECK(file_loads == 1 && nid.hIcon == SHARED);
+    t.icon_filepath = "g\xC3(.ico";                 // not UTF-8: no bytes replaced either
+    wintray_update(&t);
+    CHECK(file_loads == 1 && nid.hIcon == SHARED);
+    t.icon_id = 2; icon_in_exe = icon_in_dll = 1;   // only the exe has icon 2
+    wintray_update(&t);
+    CHECK(icon_owned && last_res == 2);
+    t.icon_id = 1; icon_in_dll = 0;
     for (int i = 0; i < 100; i++)
         wintray_update(&t);
     CHECK(icons_live == 1);                         // no leaks
@@ -655,16 +868,19 @@ static void test_icons(void)
     CHECK(this_module() == (mode_dll ? DLL : EXE));
 }
 
-static void close_window(void) { DestroyWindow(W); }
+static void close_window(void) { wnd_proc(W, WM_CLOSE, 0, 0); }
 static void test_explorer(void)
 {
     printf("explorer\n");
     explorer = DOWN;
     start(&t_menu);
     CHECK(timer_hwnd == W && nshown == 0);          // Explorer not running yet: a retry timer
+    CHECK(timer_ms >= 1000);                        // every 2 seconds, not in a busy loop
     explorer = UP;
     wnd_proc(W, WM_TIMER, timer_id, 0);             // the timer the library set
     CHECK(nshown == 1 && timer_hwnd == NULL);       // added on retry, and the timer killed
+    CHECK(shown[0].cbmsg == WM_TRAY && shown[0].icon == nid.hIcon && wsame(shown[0].tip, L"tip"));
+    CHECK(filter_hwnd == W && filter_msg == TASKBAR_CREATED);   // also when run elevated
     forget_icons();
     wnd_proc(W, TASKBAR_CREATED, 0, 0);
     CHECK(nshown == 1);                             // re-added after an Explorer restart
@@ -701,6 +917,11 @@ static void test_loop(void)
     get_calls = 0;
     CHECK(wintray_loop(0) == 0 && get_calls == 0);  // nothing waiting, and it doesn't wait
     CHECK(wintray_loop(1) == 0 && get_calls == 1);  // waits in GetMessageW for a message
+    dispatched = 0;                                 // a thread timer gets through, once
+    pending = (MSG){NULL, WM_TIMER, 7, 0, 0, {0, 0}};
+    CHECK(wintray_loop(0) == 0 && dispatched == 1 && !pending.message);
+    pending = (MSG){NULL, WM_TIMER, 7, 0, 0, {0, 0}};
+    CHECK(wintray_loop(1) == 0 && dispatched == 2 && !pending.message);
     wintray_exit();
     closed_at(__LINE__, 1);                         // the blocking loop sees WM_QUIT too
 }
@@ -709,9 +930,13 @@ static struct wintray_menu_item selfm[5], top[71], subs[70][4], many[301];
 static struct wintray t_self = {NULL, "t", NULL, selfm, 0};
 static struct wintray t_top = {NULL, "t", NULL, top, 0};
 static struct wintray t_many = {NULL, "t", NULL, many, 0};
+static char longtext[301], longtip[201];
+static struct wintray_menu_item longm[] = {{longtext, 0, 0, item_cb, NULL}, {NULL, 0, 0, NULL, NULL}};
+static struct wintray t_long = {NULL, longtip, NULL, longm, 1};
+static struct wintray t_bare = {NULL, NULL, NULL, NULL, 0};
 static void test_limits(void)
 {
-    printf("menu limits\n");
+    printf("limits\n");
     for (int i = 0; i < 4; i++)
         selfm[i] = (struct wintray_menu_item){"S", 0, 0, NULL, selfm};
     int before = menus_created;
@@ -747,6 +972,21 @@ static void test_limits(void)
     start(&t_many);
     CHECK(n_leaves == MAX_ITEMS && last_leaf_id == ID_FIRST + MAX_ITEMS - 1);
     stop();
+
+    memset(longtext, 'a', 300);                     // text longer than the buffers
+    memset(longtip, 'b', 200);
+    start(&t_long);
+    int i = find_icon(W, 1);
+    CHECK(got_len[ID_FIRST] == 255 && i >= 0 && wlen(shown[i].tip) == 127);
+    stop();
+
+    start(&t_bare);                                 // no tooltip and no menu
+    track_calls = 0; right_click();
+    i = find_icon(W, 1);
+    CHECK(track_calls == 1 && i >= 0 && shown[i].tip[0] == 0);
+    wintray_update(NULL);                           // ignored
+    CHECK(wintray_get_instance() == &t_bare);
+    stop();
 }
 
 int main(int argc, char **argv)
@@ -769,7 +1009,6 @@ int main(int argc, char **argv)
     test_explorer();
     test_loop();
     test_limits();
-    CHECK(thread_timers == 0);                      // none after the last closed() either
     printf(fails ? "%d FAILED\n" : "all passed\n", fails);
     return fails != 0;
 }

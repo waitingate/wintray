@@ -20,12 +20,20 @@
 static struct wintray *g_tray;
 static NOTIFYICONDATAW nid;
 static HWND  hwnd;
+static HWND  window;                 // hwnd until WM_NCDESTROY; a WM_DESTROY that another
+                                     // program sends clears only hwnd
+static int   closing;                // cleanup() is running
 static HMENU hmenu;
 static int   icon_owned;             // nid.hIcon was loaded by us, not shared
 static int   menu_open;
 static int   update_pending;         // wintray_update() was called while the menu was open
 static UINT  wm_taskbar_created;
 static struct wintray_menu_item *items[MAX_ITEMS];  // indexed by command ID - ID_FIRST
+static struct {                      // each item as the menu shows it
+    const char *text;
+    void (*cb)(struct wintray_menu_item *);
+    UINT flags;
+} built[MAX_ITEMS];
 static UINT  item_count;
 static UINT  menu_count;
 
@@ -82,6 +90,11 @@ static void to_wide(const char *s, wchar_t *out, int size)
     }
 }
 
+static UINT menu_flags(const struct wintray_menu_item *m)
+{
+    return MF_STRING | (m->disabled ? MF_GRAYED : 0) | (m->checked ? MF_CHECKED : 0);
+}
+
 static HMENU build_menu(struct wintray_menu_item *m, int depth)
 {
     HMENU menu = CreatePopupMenu();
@@ -92,7 +105,7 @@ static HMENU build_menu(struct wintray_menu_item *m, int depth)
         }
         wchar_t text[256];
         to_wide(m->text, text, ARRAYSIZE(text));
-        UINT flags = MF_STRING | (m->disabled ? MF_GRAYED : 0) | (m->checked ? MF_CHECKED : 0);
+        UINT flags = menu_flags(m);
         if (m->submenu) {
             if (depth < MAX_DEPTH && menu_count < MAX_MENUS) {
                 menu_count++;
@@ -101,10 +114,22 @@ static HMENU build_menu(struct wintray_menu_item *m, int depth)
             }
         } else if (item_count < MAX_ITEMS) {
             items[item_count] = m;
+            built[item_count].text = m->text;
+            built[item_count].cb = m->cb;
+            built[item_count].flags = flags;
             AppendMenuW(menu, flags, ID_FIRST + item_count++, text);
         }
     }
     return menu;
+}
+
+// Whether item i has changed since the menu was built. An update while the
+// menu is open waits until it closes, so the user may have clicked an item
+// that has meanwhile become something else.
+static int changed(UINT i)
+{
+    const struct wintray_menu_item *m = items[i];
+    return m->text != built[i].text || m->cb != built[i].cb || menu_flags(m) != built[i].flags;
 }
 
 // Returns the exe or DLL this file is compiled into. GetModuleHandleW(NULL)
@@ -134,9 +159,15 @@ static HICON load_icon(const struct wintray *t)
             h = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(t->icon_id),
                                   IMAGE_ICON, cx, cy, 0);
     } else if (t->icon_filepath) {
+        // The whole path or none: a path cut short, or with invalid bytes
+        // replaced, could name another file.
+        const char *s = t->icon_filepath;
         wchar_t path[MAX_PATH];
-        to_wide(t->icon_filepath, path, ARRAYSIZE(path));
-        h = (HICON)LoadImageW(NULL, path, IMAGE_ICON, cx, cy, LR_LOADFROMFILE);
+        int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, NULL, 0);
+        if (n > 0 && n <= MAX_PATH) {
+            MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, path, MAX_PATH);
+            h = (HICON)LoadImageW(NULL, path, IMAGE_ICON, cx, cy, LR_LOADFROMFILE);
+        }
     }
     icon_owned = (h != NULL);
     // Fall back to IDI_APPLICATION (32512). It's a shared icon: never destroy it.
@@ -186,7 +217,7 @@ static void show_menu(void)
     }
     PostMessageW(hwnd, WM_NULL, 0, 0);
     UINT i = cmd - ID_FIRST;         // cmd 0 (nothing chosen) wraps around
-    if (i < item_count && items[i]->cb)
+    if (i < item_count && items[i]->cb && !(update_pending && changed(i)))
         items[i]->cb(items[i]);
     if (update_pending)
         wintray_update(g_tray);
@@ -199,6 +230,7 @@ static void cleanup(void)
     // Clear hwnd first, so wnd_proc() ignores clicks that come in while
     // Shell_NotifyIconW waits for Explorer.
     hwnd = NULL;
+    closing = 1;
     Shell_NotifyIconW(NIM_DELETE, &nid);
     update_pending = 0;
     if (menu_open) {
@@ -210,10 +242,15 @@ static void cleanup(void)
     if (nid.hIcon && icon_owned)
         DestroyIcon(nid.hIcon);
     nid.hIcon = NULL;
+    closing = 0;
 }
 
 static LRESULT CALLBACK wnd_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
 {
+    // Another program can send WM_DESTROY without the window being destroyed.
+    // WM_NCDESTROY is the last message of a real DestroyWindow.
+    if (msg == WM_NCDESTROY && w == window)
+        window = NULL;
     if (!hwnd)                       // still in CreateWindowW, or closing
         return DefWindowProcW(w, msg, wp, lp);
     if (msg == WM_TRAY) {
@@ -250,13 +287,18 @@ struct wintray *wintray_get_instance(void) { return g_tray; }
 
 int wintray_init(struct wintray *tray)
 {
-    if (!tray || hwnd)
+    if (!tray || hwnd || closing)
         return -1;
+    if (window)                      // left over by a WM_DESTROY from another program
+        DestroyWindow(window);
     wm_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
 
     // Hidden window for the icon messages. Not a message-only window, because
     // those don't receive broadcasts such as TaskbarCreated.
+    // After the menu it keeps the keyboard focus. Windows ignores Alt+F4 for
+    // it, but Wine's DefWindowProc would close it and end the program.
     WNDCLASSW wc = {0};
+    wc.style         = CS_NOCLOSE;
     wc.lpfnWndProc   = wnd_proc;
     wc.hInstance     = this_module();
     wc.lpszClassName = CLASS_NAME;
@@ -269,6 +311,7 @@ int wintray_init(struct wintray *tray)
     hwnd = CreateWindowW(wc.lpszClassName, L"", 0, 0, 0, 0, 0, NULL, NULL, wc.hInstance, NULL);
     if (!hwnd)
         return -1;
+    window = hwnd;
     // Otherwise an elevated process never gets TaskbarCreated (UIPI).
     ChangeWindowMessageFilterEx(hwnd, wm_taskbar_created, MSGFLT_ALLOW, NULL);
 
@@ -327,8 +370,10 @@ void wintray_update(struct wintray *tray)
 
 void wintray_exit(void)
 {
-    if (hwnd) {
-        DestroyWindow(hwnd);         // the rest happens in WM_DESTROY
+    // window, not hwnd: after a WM_DESTROY from another program, the window is
+    // still there. Not while cleanup() runs: that is usually inside DestroyWindow.
+    if (window && !closing) {
+        DestroyWindow(window);       // the rest happens in WM_DESTROY
         // Windows doesn't unregister a DLL's classes when the DLL is unloaded.
         UnregisterClassW(CLASS_NAME, this_module());
     }

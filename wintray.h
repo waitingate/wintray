@@ -29,9 +29,10 @@
 // the icon is shown, on the thread that will call wintray_init().
 //
 // Limits: one icon per process, 256 menu items, 256 submenus, 8 submenu levels,
-// 255 UTF-16 units of text per menu item and 127 for the tooltip (an emoji takes
+// 255 UTF-16 units of text per menu item and 127 for the tooltip (most emoji take
 // two). Longer text is cut between characters, which can split an emoji made of
-// several, such as a flag. Windows 7 or later.
+// several, such as a flag. An icon file path can have 259 units; a longer one,
+// or one that isn't valid UTF-8, loads no icon. Windows 7 or later.
 
 #ifndef WINTRAY_H
 #define WINTRAY_H
