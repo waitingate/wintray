@@ -11,16 +11,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15                 # a run takes about 2 minutes; without a limit a hung step runs 6 hours
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install MinGW-w64
-        timeout-minutes: 10
+        timeout-minutes: 12
         run: |
-          # Only the two compilers the build uses, with retries for a slow mirror.
-          # The man-db update after installing can take minutes here and isn't needed.
+          # Only the two compilers the build uses, and no man-db update afterwards.
           sudo rm -f /var/lib/man-db/auto-update
-          apt="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30"
+          pkgs="gcc-mingw-w64-x86-64-win32 gcc-mingw-w64-i686-win32"
+          apt="sudo apt-get -y --no-install-recommends -o Acquire::Retries=3"
           $apt update
-          $apt install -y --no-install-recommends gcc-mingw-w64-x86-64-win32 gcc-mingw-w64-i686-win32
+          # Azure's mirror sometimes sends these 120 MB at about 100 KB/s. Download
+          # first, and after 4 minutes finish the download from Ubuntu's main archive
+          # (apt resumes the files it has half fetched). Then install.
+          if ! timeout 240 $apt install --download-only $pkgs; then
+              echo http://archive.ubuntu.com/ubuntu/ | sudo tee /etc/apt/apt-mirrors.txt
+              $apt update
+              $apt install --download-only $pkgs
+          fi
+          $apt install $pkgs
       - name: Build for Windows, 64 and 32 bit
         run: |
           for t in x86_64 i686; do
@@ -35,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Run the tests
         run: |
           sudo sysctl vm.mmap_rnd_bits=28   # AddressSanitizer fails with more on newer kernels
