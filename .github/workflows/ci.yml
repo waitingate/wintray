@@ -18,15 +18,14 @@ jobs:
           # Only the two compilers the build uses, and no man-db update afterwards.
           sudo rm -f /var/lib/man-db/auto-update
           pkgs="gcc-mingw-w64-x86-64-win32 gcc-mingw-w64-i686-win32"
-          apt="sudo apt-get -y --no-install-recommends -o Acquire::Retries=3"
+          apt="sudo apt-get -y --no-install-recommends"
           $apt update
-          # Azure's mirror sometimes sends these 120 MB at about 100 KB/s. Download
-          # first, and after 4 minutes finish the download from Ubuntu's main archive
-          # (apt resumes the files it has half fetched). Then install.
-          if ! timeout 240 $apt install --download-only $pkgs; then
+          # Azure's mirror sometimes sends these 120 MB at about 100 KB/s, and apt has
+          # no minimum speed. If the download fails or takes over a minute, the rest
+          # comes from Ubuntu's main archive. Only the download is timed, so the limit
+          # never stops dpkg halfway.
+          if ! timeout 60 $apt install --download-only $pkgs; then
               echo http://archive.ubuntu.com/ubuntu/ | sudo tee /etc/apt/apt-mirrors.txt
-              $apt update
-              $apt install --download-only $pkgs
           fi
           $apt install $pkgs
       - name: Build for Windows, 64 and 32 bit
