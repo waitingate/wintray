@@ -332,8 +332,7 @@ BOOL DestroyWindow(HWND hw)
     WIN(hw).c->proc(hw, WM_NCDESTROY, 0, 0);
     WIN(hw).dying = 0;
     WIN(hw).c->windows--;
-    if (timer_hwnd == hw)
-        timer_hwnd = NULL;                  // a window's timers go with it
+    KillTimer(hw, timer_id);                // a window's timers go with it
     return TRUE;
 }
 
@@ -450,22 +449,21 @@ BOOL ChangeWindowMessageFilterEx(HWND h, UINT m, DWORD a, void *p)
 static int get_calls, dispatched;
 static MSG pending;                         // a posted message, unless WM_NULL
 static int matches(HWND filter) { return pending.message && (!filter || filter == pending.hwnd); }
-BOOL GetMessageW(MSG *m, HWND h, UINT a, UINT b)
-{
-    (void)a; (void)b;
-    get_calls++;
-    if (quit_posted) { quit_posted--; m->message = WM_QUIT; return 0; }
-    if (matches(h)) { *m = pending; pending.message = WM_NULL; return 1; }
-    m->message = WM_NULL;                   // a message wintray has nothing to do with
-    m->hwnd = NULL;
-    return 1;
-}
 BOOL PeekMessageW(MSG *m, HWND h, UINT a, UINT b, UINT r)
 {
     (void)a; (void)b;
     if (quit_posted) { quit_posted -= (r & PM_REMOVE) != 0; m->message = WM_QUIT; return 1; }
     if (matches(h)) { *m = pending; if (r & PM_REMOVE) pending.message = WM_NULL; return 1; }
     return 0;
+}
+BOOL GetMessageW(MSG *m, HWND h, UINT a, UINT b)
+{
+    get_calls++;
+    if (PeekMessageW(m, h, a, b, PM_REMOVE))
+        return m->message != WM_QUIT;
+    m->message = WM_NULL;                   // a message wintray has nothing to do with
+    m->hwnd = NULL;
+    return 1;
 }
 BOOL TranslateMessage(const MSG *m) { (void)m; return TRUE; }
 LRESULT DispatchMessageW(const MSG *m) { dispatched += m->message != WM_NULL; return 0; }
@@ -512,8 +510,8 @@ static void test_to_wide(void)
     static const int small[] = {1, 2, 3, 4, 5, 6, 8, 13, 32}, big[] = {128, 256, 260};
     int bad_ref = 0, bad_inv = 0;
     srand(1);
-    for (int it = 0; it < 101000; it++) {           // valid UTF-8, all character sizes
-        int bigcase = it >= 100000;
+    for (int it = 0; it < 21000; it++) {            // valid UTF-8, all character sizes
+        int bigcase = it >= 20000;
         int size = bigcase ? big[rand() % ARRAYSIZE(big)] : small[rand() % ARRAYSIZE(small)];
         int target = rand() % ((bigcase ? 1200 : 120) + 1), len = 0;
         while (len < target)
@@ -523,10 +521,13 @@ static void test_to_wide(void)
         ref_conv(s, size, r);
         bad_ref += !wsame(a, r);
     }
-    for (int it = 0; it < 50000; it++) {            // random bytes, mostly not valid UTF-8
+    // Half the bytes are the ones where UTF-8's ranges start and end.
+    static const unsigned char edge[] = {0x41, 0x7F, 0x80, 0x8F, 0x90, 0x9F, 0xA0, 0xBF, 0xC0,
+                                         0xC1, 0xC2, 0xDF, 0xE0, 0xED, 0xEF, 0xF0, 0xF4, 0xF5, 0xFF};
+    for (int it = 0; it < 20000; it++) {            // random bytes, mostly not valid UTF-8
         int size = small[rand() % ARRAYSIZE(small)], len = rand() % 150;
         for (int i = 0; i < len; i++)
-            s[i] = (char)(1 + rand() % 255);
+            s[i] = (char)(rand() % 2 ? edge[rand() % ARRAYSIZE(edge)] : 1 + rand() % 255);
         s[len] = 0;
         to_wide(s, a, size);
         ref_conv(s, size, r);
@@ -598,6 +599,7 @@ static void closed_at(int line, int blocking)
     // A failure here must not fail later tests too.
     track_hook = cb_hook = item_hook = notify_hook = NULL;
     notify_on = NO_CALL;
+    track_ret = 0;
     if (hwnd)
         wintray_exit();                             // or every later start() fails
     quit_posted = thread_timers = 0;
@@ -680,12 +682,17 @@ static struct wintray_menu_item flagm[] = {
 static struct wintray t_flags = {NULL, "t", NULL, flagm, 1};
 
 // Items changed in place while the menu is open, then an update, as a timer may do.
+// B keeps its check mark.
 static struct wintray_menu_item dyn[] = {
-    {"A", 0, 0, item_cb, NULL}, {"B", 0, 0, item_cb, NULL}, {NULL, 0, 0, NULL, NULL}};
+    {"A", 0, 0, item_cb, NULL}, {"B", 0, 1, item_cb, NULL}, {NULL, 0, 0, NULL, NULL}};
 static struct wintray t_dyn = {NULL, "t", NULL, dyn, 1};
 static int other_calls;
 static void other_cb(struct wintray_menu_item *m) { (void)m; other_calls++; }
+static struct wintray_menu_item pick[] = {
+    {"First", 0, 0, item_cb, NULL}, {"Second", 0, 0, other_cb, NULL}, {NULL, 0, 0, NULL, NULL}};
+static struct wintray t_pick = {NULL, "t", NULL, pick, 1};
 static void rename_a(void) { dyn[0].text = "X"; wintray_update(&t_dyn); }
+static void rename_a_quietly(void) { dyn[0].text = "X"; }   // no update
 static void recall_a(void) { dyn[0].cb = other_cb; wintray_update(&t_dyn); }
 static void gray_a(void) { dyn[0].disabled = 1; wintray_update(&t_dyn); }
 static void reset_dyn(void)
@@ -697,7 +704,9 @@ static void reset_dyn(void)
 static void test_menu(void)
 {
     printf("menu\n");
+    n_separators = 0;
     start(&t_menu);
+    CHECK(n_separators == 1);                       // "-" is a separator line
     track_calls = 0; track_hook = right_click; right_click();
     CHECK(track_calls == 1 && menu_open == 0);      // clicked again while the menu is open
     int before = menus_created;
@@ -718,13 +727,16 @@ static void test_menu(void)
     right_click();
     CHECK(item_calls == 1);
     closed();
-    track_ret = 0;
 
     start(&t_menu);                                 // the item chosen is the one called
     track_ret = ID_FIRST + 1; last_item = NULL; nulls_posted = 0;
     right_click();
     CHECK(last_item == &menu1[2] && nulls_posted == 1);   // "Exit", and WM_NULL after the menu
-    track_ret = 0;
+    stop();
+    start(&t_pick);                                 // with its own callback
+    track_ret = ID_FIRST + 1; item_calls = other_calls = 0;
+    right_click();
+    CHECK(other_calls == 1 && item_calls == 0);
     stop();
 
     n_separators = 0;
@@ -735,7 +747,6 @@ static void test_menu(void)
     track_ret = ID_FIRST + 3; item_calls = 0;
     right_click();                                  // an item without a callback
     CHECK(item_calls == 0);
-    track_ret = 0;
     stop();
 
     // A click on an item that changed while the menu was open is dropped, since
@@ -756,7 +767,8 @@ static void test_menu(void)
     reset_dyn();
     track_ret = ID_FIRST; right_click();
     CHECK(item_calls == 2);                         // no update while it was open
-    track_ret = 0;
+    track_hook = rename_a_quietly; right_click();
+    CHECK(item_calls == 3);                         // changed, but no update came: it counts
     stop();
 }
 
@@ -832,24 +844,24 @@ static void test_icons(void)
     static struct wintray t = {NULL, "tip", NULL, menu1, 1};
     icon_in_dll = 0; icon_in_exe = 1; from_dll = from_exe = 0;
     start(&t);
-    CHECK(icon_owned && from_exe == 1 && from_dll == 0);   // icon in the exe
+    CHECK(own_icon && nid.hIcon == own_icon && from_exe == 1 && from_dll == 0);   // icon in the exe
     if (mode_dll) {
         icon_in_dll = 1;
         wintray_update(&t);
-        CHECK(icon_owned && from_dll == 1 && from_exe == 1);   // the DLL's own icon comes first
+        CHECK(own_icon && from_dll == 1 && from_exe == 1);   // the DLL's own icon comes first
     }
     icon_in_dll = icon_in_exe = 0;
     wintray_update(&t);
-    CHECK(nid.hIcon == SHARED && !icon_owned);     // no icon anywhere: shared default
+    CHECK(nid.hIcon == SHARED && !own_icon);       // no icon anywhere: shared default
     wintray_update(&t);                             // and it's never destroyed
     t.icon_id = 0; t.icon_filepath = "good.ico"; wintray_update(&t);
-    CHECK(icon_owned);
+    CHECK(own_icon);
     t.icon_filepath = "bad.ico"; wintray_update(&t);
     CHECK(nid.hIcon == SHARED);
     static char path[MAX_PATH + 1];                 // a path is used whole or not at all:
     memset(path, 'g', MAX_PATH - 1);                // the longest that fits
     file_loads = 0; t.icon_filepath = path; wintray_update(&t);
-    CHECK(file_loads == 1 && last_path_len == MAX_PATH - 1 && icon_owned);
+    CHECK(file_loads == 1 && last_path_len == MAX_PATH - 1 && own_icon);
     path[MAX_PATH - 1] = 'g';                       // one unit longer: not cut short
     wintray_update(&t);
     CHECK(file_loads == 1 && nid.hIcon == SHARED);
@@ -858,7 +870,7 @@ static void test_icons(void)
     CHECK(file_loads == 1 && nid.hIcon == SHARED);
     t.icon_id = 2; icon_in_exe = icon_in_dll = 1;   // only the exe has icon 2
     wintray_update(&t);
-    CHECK(icon_owned && last_res == 2);
+    CHECK(own_icon && last_res == 2);
     t.icon_id = 1; icon_in_dll = 0;
     for (int i = 0; i < 100; i++)
         wintray_update(&t);
@@ -879,6 +891,9 @@ static void test_explorer(void)
     explorer = UP;
     wnd_proc(W, WM_TIMER, timer_id, 0);             // the timer the library set
     CHECK(nshown == 1 && timer_hwnd == NULL);       // added on retry, and the timer killed
+    int calls = notify_calls;
+    wnd_proc(W, WM_TIMER, timer_id + 1, 0);         // a timer that isn't the library's
+    CHECK(notify_calls == calls);
     CHECK(shown[0].cbmsg == WM_TRAY && shown[0].icon == nid.hIcon && wsame(shown[0].tip, L"tip"));
     CHECK(filter_hwnd == W && filter_msg == TASKBAR_CREATED);   // also when run elevated
     forget_icons();

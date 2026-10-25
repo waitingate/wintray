@@ -13,7 +13,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15                 # a run takes about 2 minutes; without a limit a hung step runs 6 hours
+    timeout-minutes: 15                 # a run takes under a minute; without a limit a hung step runs 6 hours
     steps:
       - uses: actions/checkout@v7
         with:
@@ -57,3 +57,7 @@ jobs:
         run: |
           sudo sysctl vm.mmap_rnd_bits=28   # AddressSanitizer fails with more on newer kernels
           sh test/run.sh
+      - name: Check that README.md's API section is a copy of wintray.h
+        run: |
+          s='/^struct wintray {/,/^struct wintray \*wintray_get_instance/p'
+          diff <(sed -n "$s" wintray.h) <(sed -n "$s" README.md)

@@ -43,8 +43,6 @@
 extern "C" {
 #endif
 
-struct wintray_menu_item;
-
 struct wintray {
     const char *icon_filepath;          // .ico file (full path), used if icon_id is 0
     const char *tooltip;                // UTF-8

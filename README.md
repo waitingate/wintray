@@ -87,8 +87,8 @@ folder.
 
 If the icon can't be loaded, the tray shows the standard icon, and wintray
 reports no error. That happens with an `icon_id` that isn't in the program, a
-missing file, and a path longer than 259 UTF-16 units or not valid UTF-8: such
-a path is never cut short, so it can't name another file.
+missing file, and a path that is too long (see [Limits](#limits)) or not valid
+UTF-8: such a path is never cut short, so it can't name another file.
 
 ## Examples
 

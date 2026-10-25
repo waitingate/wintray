@@ -1,6 +1,3 @@
-# test programs, kept locally
-tests/
-
 *.o
 *.obj
 *.exe

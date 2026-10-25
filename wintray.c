@@ -24,7 +24,7 @@ static HWND  window;                 // hwnd until WM_NCDESTROY; a WM_DESTROY th
                                      // program sends clears only hwnd
 static int   closing;                // cleanup() is running
 static HMENU hmenu;
-static int   icon_owned;             // nid.hIcon was loaded by us, not shared
+static HICON own_icon;               // the icon in nid if we loaded it, else NULL
 static int   menu_open;
 static int   update_pending;         // wintray_update() was called while the menu was open
 static UINT  wm_taskbar_created;
@@ -147,6 +147,7 @@ static HINSTANCE this_module(void)
     return m;
 }
 
+// The icon from icon_id or icon_filepath, or NULL.
 static HICON load_icon(const struct wintray *t)
 {
     int cx = GetSystemMetrics(SM_CXSMICON), cy = GetSystemMetrics(SM_CYSMICON);
@@ -160,18 +161,13 @@ static HICON load_icon(const struct wintray *t)
                                   IMAGE_ICON, cx, cy, 0);
     } else if (t->icon_filepath) {
         // The whole path or none: a path cut short, or with invalid bytes
-        // replaced, could name another file.
+        // replaced, could name another file. MultiByteToWideChar fails for both.
         const char *s = t->icon_filepath;
         wchar_t path[MAX_PATH];
-        int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, NULL, 0);
-        if (n > 0 && n <= MAX_PATH) {
-            MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, path, MAX_PATH);
+        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, path, MAX_PATH))
             h = (HICON)LoadImageW(NULL, path, IMAGE_ICON, cx, cy, LR_LOADFROMFILE);
-        }
     }
-    icon_owned = (h != NULL);
-    // Fall back to IDI_APPLICATION (32512). It's a shared icon: never destroy it.
-    return h ? h : LoadIconW(NULL, MAKEINTRESOURCEW(32512));
+    return h;
 }
 
 // NIM_MODIFY fails when Explorer doesn't know the icon (first call, or after
@@ -210,7 +206,7 @@ static void show_menu(void)
     UINT cmd = (UINT)TrackPopupMenu(hmenu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
                                     p.x, p.y, 0, hwnd, NULL);
     menu_open = 0;
-    if (!hwnd) {                     // wintray_exit() was called while the menu was open
+    if (!hwnd) {                     // closed while the menu was open
         DestroyMenu(hmenu);
         hmenu = NULL;
         return;
@@ -239,9 +235,9 @@ static void cleanup(void)
         DestroyMenu(hmenu);
         hmenu = NULL;
     }
-    if (nid.hIcon && icon_owned)
-        DestroyIcon(nid.hIcon);
-    nid.hIcon = NULL;
+    if (own_icon)
+        DestroyIcon(own_icon);
+    own_icon = nid.hIcon = NULL;
     closing = 0;
 }
 
@@ -359,12 +355,13 @@ void wintray_update(struct wintray *tray)
     menu_count = 0;
     hmenu = build_menu(tray->menu, 0);
 
-    HICON old = nid.hIcon;
-    int old_owned = icon_owned;
-    nid.hIcon = load_icon(tray);
+    HICON old = own_icon;
+    own_icon = load_icon(tray);
+    // No icon of our own: IDI_APPLICATION (32512), a shared icon, never destroyed.
+    nid.hIcon = own_icon ? own_icon : LoadIconW(NULL, MAKEINTRESOURCEW(32512));
     to_wide(tray->tooltip, nid.szTip, ARRAYSIZE(nid.szTip));
     show_icon();
-    if (old && old_owned)
+    if (old)
         DestroyIcon(old);
 }
 
