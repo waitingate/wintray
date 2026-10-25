@@ -307,12 +307,12 @@ struct wintray_menu_item {
 };
 
 int  wintray_init(struct wintray *tray);    // 0 on success, -1 on error or if already running
-int  wintray_loop(int blocking);            // handles one message (1: waits for one); -1 once closed
+int  wintray_loop(int blocking);            // handles one message (1: waits for one); -1 on WM_QUIT
 void wintray_update(struct wintray *tray);  // call after changing the icon, tooltip or menu
-void wintray_exit(void);                    // removes the icon and posts WM_QUIT
+void wintray_exit(void);                    // removes the icon and its window, which posts WM_QUIT
 
-// The struct that the last wintray_init() or wintray_update() took (an update
-// without an icon window takes nothing); NULL before the first wintray_init().
+// The struct that the last wintray_init() or wintray_update() took; NULL before
+// the first wintray_init().
 struct wintray *wintray_get_instance(void);
 ```
 
@@ -356,13 +356,12 @@ struct wintray *wintray_get_instance(void);
   `wintray_exit()` works only on the wintray thread. Post `WM_QUIT` to that
   thread (`PostThreadMessageW`), call `wintray_exit()` there once
   `wintray_loop()` returns -1, and wait for the thread to end.
-- wintray needs C99 or later; the header also works from C++. With other
-  compilers, add `wintray.c` to your project and link `user32` and
-  `shell32`, and `kernel32` if your project leaves out the default libraries.
-  I haven't tried MSVC yet. Without the C runtime, turn off its checks that
-  call into the runtime: `/GS-`, and in a new Visual Studio project also the
-  SDL checks (`/sdl-`), the run-time checks (no `/RTC1`) and Just My Code
-  (`/JMC-`).
+- wintray needs C99 or later. With other compilers, add `wintray.c` to your
+  project and link `user32` and `shell32`, and `kernel32` if your project
+  leaves out the default libraries. I haven't tried MSVC yet. Without the C
+  runtime, turn off its checks that call into the runtime: `/GS-`, and in a
+  new Visual Studio project also the SDL checks (`/sdl-`), the run-time
+  checks (no `/RTC1`) and Just My Code (`/JMC-`).
 
 ## Limits
 
@@ -395,7 +394,7 @@ main and every pull request.
 The same tests also build on Windows with MinGW, without AddressSanitizer:
 
 ```
-gcc -std=gnu11 -fshort-wchar -I test test/test.c -o logic-test.exe
+gcc -std=gnu11 -fshort-wchar -g -O1 -fsanitize=undefined -fsanitize-trap=undefined -Wall -Wextra -I test test/test.c -o logic-test.exe
 .\logic-test.exe exe
 .\logic-test.exe dll
 .\logic-test.exe gmhfail

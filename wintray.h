@@ -67,12 +67,12 @@ struct wintray_menu_item {
 };
 
 int  wintray_init(struct wintray *tray);    // 0 on success, -1 on error or if already running
-int  wintray_loop(int blocking);            // handles one message (1: waits for one); -1 once closed
+int  wintray_loop(int blocking);            // handles one message (1: waits for one); -1 on WM_QUIT
 void wintray_update(struct wintray *tray);  // call after changing the icon, tooltip or menu
-void wintray_exit(void);                    // removes the icon and posts WM_QUIT
+void wintray_exit(void);                    // removes the icon and its window, which posts WM_QUIT
 
-// The struct that the last wintray_init() or wintray_update() took (an update
-// without an icon window takes nothing); NULL before the first wintray_init().
+// The struct that the last wintray_init() or wintray_update() took; NULL before
+// the first wintray_init().
 struct wintray *wintray_get_instance(void);
 
 #ifdef __cplusplus

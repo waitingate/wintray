@@ -8,6 +8,7 @@
 #define WM_TRAY     (WM_APP + 1)     // notification icon callback message
 #define ID_FIRST    1000             // first menu command ID
 #define MAX_ITEMS   256
+#define MAX_TEXT    256              // a menu item's text in UTF-16 units, with the final 0
 #define MAX_DEPTH   8                // max submenu nesting
 #define MAX_MENUS   256              // max submenus in total, in case a menu
                                      // contains itself
@@ -103,7 +104,7 @@ static HMENU build_menu(struct wintray_menu_item *m, int depth, UINT above)
             AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
             continue;
         }
-        wchar_t text[256];
+        wchar_t text[MAX_TEXT];
         to_wide(m->text, text, ARRAYSIZE(text));
         UINT flags = menu_flags(m);
         if (m->submenu) {
@@ -120,6 +121,15 @@ static HMENU build_menu(struct wintray_menu_item *m, int depth, UINT above)
         }
     }
     return menu;
+}
+
+// item_count goes with the menu, so items[] never describes a menu that is gone.
+static void free_menu(void)
+{
+    if (hmenu)
+        DestroyMenu(hmenu);          // destroys the submenus too
+    hmenu = NULL;
+    item_count = 0;
 }
 
 // Returns the exe or DLL this file is compiled into. GetModuleHandleW(NULL)
@@ -189,29 +199,29 @@ static void show_icon(void)
 
 // An update came while the menu was open, so the clicked item may have changed
 // or left the menu, and a program may free an item it took out. So run the
-// update first, and return i only if command cmd still shows the same text,
-// state and callback, else MAX_ITEMS. The text it showed comes from the old
-// menu, never from the item.
-static UINT update_and_check(UINT i, UINT cmd)
+// update first, and keep the click on item i only if its command still shows
+// the same text, state and callback. Both texts are read from the menus, never
+// from the item.
+static int update_and_check(UINT i)
 {
-    void (*cb)(struct wintray_menu_item *) = NULL;
-    UINT flags = 0;
-    wchar_t was[256], now[256];
-    int had = i < item_count;
-    was[0] = 0;
-    if (had) {
-        cb = built[i].cb;
-        flags = built[i].flags;
-        GetMenuStringW(hmenu, cmd, was, ARRAYSIZE(was), MF_BYCOMMAND);
+    if (i >= item_count) {           // nothing chosen
+        wintray_update(g_tray);
+        return 0;
     }
+    void (*cb)(struct wintray_menu_item *) = built[i].cb;
+    UINT flags = built[i].flags;
+    wchar_t was[MAX_TEXT], now[MAX_TEXT];
+    was[0] = now[0] = 0;
+    GetMenuStringW(hmenu, ID_FIRST + i, was, ARRAYSIZE(was), MF_BYCOMMAND);
     wintray_update(g_tray);
-    if (!had || !hwnd || i >= item_count || built[i].cb != cb || built[i].flags != flags)
-        return MAX_ITEMS;
-    to_wide(items[i]->text, now, ARRAYSIZE(now));
+    // A window closed meanwhile has freed its menu, and item_count is 0.
+    if (i >= item_count || built[i].cb != cb || built[i].flags != flags)
+        return 0;
+    GetMenuStringW(hmenu, ID_FIRST + i, now, ARRAYSIZE(now), MF_BYCOMMAND);
     for (int k = 0; was[k] == now[k]; k++)
         if (!was[k])
-            return i;
-    return MAX_ITEMS;
+            return 1;
+    return 0;
 }
 
 static void show_menu(void)
@@ -228,14 +238,13 @@ static void show_menu(void)
                                     p.x, p.y, 0, hwnd, NULL);
     menu_open = 0;
     if (!hwnd) {                     // closed while the menu was open
-        DestroyMenu(hmenu);
-        hmenu = NULL;
+        free_menu();
         return;
     }
     PostMessageW(hwnd, WM_NULL, 0, 0);
     UINT i = cmd - ID_FIRST;         // cmd 0 (nothing chosen) wraps around
-    if (update_pending)
-        i = update_and_check(i, cmd);
+    if (update_pending && !update_and_check(i))
+        return;
     if (i < item_count && items[i]->cb)
         items[i]->cb(items[i]);
 }
@@ -250,12 +259,10 @@ static void cleanup(void)
     closing = 1;
     Shell_NotifyIconW(NIM_DELETE, &nid);
     update_pending = 0;
-    if (menu_open) {
+    if (menu_open)
         EndMenu();                   // show_menu() frees the menu when it returns
-    } else if (hmenu) {
-        DestroyMenu(hmenu);
-        hmenu = NULL;
-    }
+    else
+        free_menu();
     if (own_icon)
         DestroyIcon(own_icon);
     own_icon = nid.hIcon = NULL;
@@ -371,9 +378,7 @@ void wintray_update(struct wintray *tray)
     }
     update_pending = 0;              // this update covers a pending one
 
-    if (hmenu)
-        DestroyMenu(hmenu);          // destroys the submenus too
-    item_count = 0;
+    free_menu();
     menu_count = 0;
     hmenu = build_menu(tray->menu, 0, 0);
 
