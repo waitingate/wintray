@@ -239,7 +239,7 @@ HANDLE LoadImageW(HINSTANCE h, LPCWSTR name, UINT type, int cx, int cy, UINT fl)
     icons_live++;
     return (HANDLE)(uintptr_t)id;
 }
-HICON LoadIconW(HINSTANCE h, LPCWSTR n) { (void)h; (void)n; return SHARED; }
+HICON LoadIconW(HINSTANCE h, LPCWSTR n) { return !h && n == MAKEINTRESOURCEW(32512) ? SHARED : NULL; }
 BOOL DestroyIcon(HICON i)
 {
     CHECK(i != SHARED);                     // the shared icon is never destroyed
@@ -358,6 +358,8 @@ BOOL Shell_NotifyIconW(DWORD m, NOTIFYICONDATAW *d)
     NOTIFYICONDATAW r = *d;
     notify_calls++;
     CHECK(r.cbSize == sizeof r);
+    if (m != NIM_DELETE && (r.uFlags & NIF_ICON))   // a live icon, not NULL or destroyed
+        CHECK(r.hIcon == SHARED || (r.hIcon && i_live[(int)(uintptr_t)r.hIcon]));
     if (m == notify_on)
         run_hook(&notify_hook);             // messages handled while it waits for Explorer
     int i = find_icon(r.hWnd, r.uID);
@@ -448,12 +450,16 @@ BOOL ChangeWindowMessageFilterEx(HWND h, UINT m, DWORD a, void *p)
 }
 static int get_calls, dispatched;
 static MSG pending;                         // a posted message, unless WM_NULL
-static int matches(HWND filter) { return pending.message && (!filter || filter == pending.hwnd); }
 BOOL PeekMessageW(MSG *m, HWND h, UINT a, UINT b, UINT r)
 {
     (void)a; (void)b;
     if (quit_posted) { quit_posted -= (r & PM_REMOVE) != 0; m->message = WM_QUIT; return 1; }
-    if (matches(h)) { *m = pending; if (r & PM_REMOVE) pending.message = WM_NULL; return 1; }
+    if (pending.message && (!h || h == pending.hwnd)) {
+        *m = pending;
+        if (r & PM_REMOVE)
+            pending.message = WM_NULL;
+        return 1;
+    }
     return 0;
 }
 BOOL GetMessageW(MSG *m, HWND h, UINT a, UINT b)
@@ -535,6 +541,21 @@ static void test_to_wide(void)
     }
     CHECK(bad_ref == 0);
     CHECK(bad_inv == 0);
+
+    // Each lead byte with the second bytes at the edges of what it allows,
+    // checked directly, so no random sequence has to hit them.
+    static const unsigned char lead[] = {0xC1, 0xC2, 0xDF, 0xE0, 0xE1, 0xED, 0xEE, 0xEF, 0xF0, 0xF1, 0xF4, 0xF5};
+    static const unsigned char second[] = {0x7F, 0x80, 0x8F, 0x90, 0x9F, 0xA0, 0xBF, 0xC0};
+    int bad_edge = 0;
+    for (int i = 0; i < (int)ARRAYSIZE(lead); i++)
+        for (int j = 0; j < (int)ARRAYSIZE(second); j++) {
+            unsigned char e[5] = {lead[i], second[j], 0x80, 0x80, 0};
+            unsigned c;
+            int k = dec(e, 4, 0, &c), valid = c != 0xFFFD || (k == 3 && e[0] == 0xEF);
+            bad_edge += utf8_len((const char *)e) != (valid ? k : 0);
+        }
+    CHECK(bad_edge == 0);
+
     memset(s, 'a', 1000);
     s[1000] = 0;
     mb_calls = 0; to_wide(s, a, 256);
@@ -603,6 +624,11 @@ static void closed_at(int line, int blocking)
     if (hwnd)
         wintray_exit();                             // or every later start() fails
     quit_posted = thread_timers = 0;
+    memset(m_live, 0, sizeof m_live);               // a leaked menu or icon counts once
+    memset(i_live, 0, sizeof i_live);
+    menus_live = icons_live = on_screen = 0;
+    forget_icons();
+    explorer = UP;
     if (fails > before)
         printf("    called from line %d\n", line);
 }
@@ -687,14 +713,20 @@ static struct wintray_menu_item dyn[] = {
     {"A", 0, 0, item_cb, NULL}, {"B", 0, 1, item_cb, NULL}, {NULL, 0, 0, NULL, NULL}};
 static struct wintray t_dyn = {NULL, "t", NULL, dyn, 1};
 static int other_calls;
-static void other_cb(struct wintray_menu_item *m) { (void)m; other_calls++; }
+static void other_cb(struct wintray_menu_item *m) { last_item = m; other_calls++; }
 static struct wintray_menu_item pick[] = {
-    {"First", 0, 0, item_cb, NULL}, {"Second", 0, 0, other_cb, NULL}, {NULL, 0, 0, NULL, NULL}};
+    {"First", 0, 0, item_cb, NULL}, {"Second", 0, 0, other_cb, NULL}, {"Third", 0, 0, item_cb, NULL},
+    {NULL, 0, 0, NULL, NULL}};
 static struct wintray t_pick = {NULL, "t", NULL, pick, 1};
-static void rename_a(void) { dyn[0].text = "X"; wintray_update(&t_dyn); }
+static struct wintray t_alt = {NULL, "alt", NULL, menu1, 1};
+static char label[8];                       // a text rewritten in place
 static void rename_a_quietly(void) { dyn[0].text = "X"; }   // no update
+static void rename_a(void) { rename_a_quietly(); wintray_update(&t_dyn); }
+static void rewrite_a(void) { strcpy(label, "X"); wintray_update(&t_dyn); }
 static void recall_a(void) { dyn[0].cb = other_cb; wintray_update(&t_dyn); }
 static void gray_a(void) { dyn[0].disabled = 1; wintray_update(&t_dyn); }
+static void check_a(void) { dyn[0].checked = 1; wintray_update(&t_dyn); }
+static void update_alt(void) { wintray_update(&t_alt); }
 static void reset_dyn(void)
 {
     dyn[0] = (struct wintray_menu_item){"A", 0, 0, item_cb, NULL};
@@ -728,15 +760,16 @@ static void test_menu(void)
     CHECK(item_calls == 1);
     closed();
 
-    start(&t_menu);                                 // the item chosen is the one called
-    track_ret = ID_FIRST + 1; last_item = NULL; nulls_posted = 0;
+    start(&t_pick);                                 // the chosen item, with its own callback
+    track_ret = ID_FIRST + 1; item_calls = other_calls = 0; last_item = NULL; nulls_posted = 0;
     right_click();
-    CHECK(last_item == &menu1[2] && nulls_posted == 1);   // "Exit", and WM_NULL after the menu
+    CHECK(other_calls == 1 && item_calls == 0 && last_item == &pick[1] && nulls_posted == 1);
     stop();
-    start(&t_pick);                                 // with its own callback
-    track_ret = ID_FIRST + 1; item_calls = other_calls = 0;
-    right_click();
-    CHECK(other_calls == 1 && item_calls == 0);
+
+    start(&t_menu);                                 // an update with another struct while open
+    track_hook = update_alt; right_click();
+    int i = find_icon(W, 1);
+    CHECK(wintray_get_instance() == &t_alt && i >= 0 && wsame(shown[i].tip, L"alt"));
     stop();
 
     n_separators = 0;
@@ -749,8 +782,9 @@ static void test_menu(void)
     CHECK(item_calls == 0);
     stop();
 
-    // A click on an item that changed while the menu was open is dropped, since
-    // the user clicked what it was before. One that didn't change still counts.
+    // A click on an item that an update changed while the menu was open is
+    // dropped, since the user clicked what it was before. One that didn't
+    // change, or changed without an update, still counts.
     start(&t_dyn);
     item_calls = other_calls = 0;
     track_hook = rename_a; track_ret = ID_FIRST; right_click();
@@ -764,6 +798,12 @@ static void test_menu(void)
     reset_dyn();
     track_hook = gray_a; track_ret = ID_FIRST; right_click();
     CHECK(item_calls == 1);                         // grayed out meanwhile
+    reset_dyn();
+    track_hook = check_a; track_ret = ID_FIRST; right_click();
+    CHECK(item_calls == 1);                         // checked meanwhile
+    strcpy(label, "A"); dyn[0].text = label; wintray_update(&t_dyn);
+    track_hook = rewrite_a; track_ret = ID_FIRST; right_click();
+    CHECK(item_calls == 1);                         // the same buffer, rewritten
     reset_dyn();
     track_ret = ID_FIRST; right_click();
     CHECK(item_calls == 2);                         // no update while it was open
@@ -828,6 +868,10 @@ static void test_closing(void)
     closed();
     start(&t_menu);                                 // or the next init does
     stop();
+    start(&t_menu);                                 // a WM_NCDESTROY from another program
+    wnd_proc(W, WM_NCDESTROY, 0, 0);
+    CHECK(window == W);                             // doesn't make wintray forget the window
+    stop();
 
     start(&t_menu);                                 // exit and init again while the
     notify_on = NIM_DELETE; notify_hook = exit_again;   // window is being destroyed
@@ -871,7 +915,12 @@ static void test_icons(void)
     t.icon_id = 2; icon_in_exe = icon_in_dll = 1;   // only the exe has icon 2
     wintray_update(&t);
     CHECK(own_icon && last_res == 2);
-    t.icon_id = 1; icon_in_dll = 0;
+    t.icon_id = 65537;                              // over 16 bits: no icon, rather than icon 1
+    wintray_update(&t);
+    CHECK(nid.hIcon == SHARED && !own_icon);
+    t.icon_id = 1; icon_in_dll = 0; t.icon_filepath = "good.ico"; file_loads = 0;
+    wintray_update(&t);
+    CHECK(own_icon && last_res == 1 && file_loads == 0);   // icon_id, not the file
     for (int i = 0; i < 100; i++)
         wintray_update(&t);
     CHECK(icons_live == 1);                         // no leaks
@@ -952,6 +1001,7 @@ static struct wintray t_bare = {NULL, NULL, NULL, NULL, 0};
 static void test_limits(void)
 {
     printf("limits\n");
+    CHECK(MAX_ITEMS == 256 && MAX_MENUS == 256 && MAX_DEPTH == 8);   // as wintray.h and README.md say
     for (int i = 0; i < 4; i++)
         selfm[i] = (struct wintray_menu_item){"S", 0, 0, NULL, selfm};
     int before = menus_created;

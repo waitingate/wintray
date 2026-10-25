@@ -43,12 +43,14 @@
 extern "C" {
 #endif
 
+struct wintray_menu_item;
+
 struct wintray {
     const char *icon_filepath;          // .ico file (full path), used if icon_id is 0
     const char *tooltip;                // UTF-8
     void (*cb)(struct wintray *);       // left click; if NULL, left click opens the menu
     struct wintray_menu_item *menu;     // ends with an item whose text is NULL
-    int icon_id;                        // icon resource ID, or 0
+    int icon_id;                        // icon resource ID (1 to 65535), or 0
 };
 
 struct wintray_menu_item {

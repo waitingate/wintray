@@ -58,6 +58,9 @@ jobs:
           sudo sysctl vm.mmap_rnd_bits=28   # AddressSanitizer fails with more on newer kernels
           sh test/run.sh
       - name: Check that README.md's API section is a copy of wintray.h
+        if: ${{ !cancelled() }}             # also when the tests failed
         run: |
-          s='/^struct wintray {/,/^struct wintray \*wintray_get_instance/p'
-          diff <(sed -n "$s" wintray.h) <(sed -n "$s" README.md)
+          # Everything inside extern "C" against the code block under "## API".
+          awk '/^extern "C"/ {on = 1; next} on && /^#ifdef __cplusplus/ {exit} on && !/^#endif/' wintray.h > api-h.txt
+          awk '/^## API/ {api = 1} api && /^```/ {if (on) exit; on = 1; next} on' README.md > api-r.txt
+          test -s api-h.txt && test -s api-r.txt && diff -B api-h.txt api-r.txt

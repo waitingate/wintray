@@ -30,7 +30,7 @@ static int   update_pending;         // wintray_update() was called while the me
 static UINT  wm_taskbar_created;
 static struct wintray_menu_item *items[MAX_ITEMS];  // indexed by command ID - ID_FIRST
 static struct {                      // each item as the menu shows it
-    const char *text;
+    UINT hash;                       // of the text, which may be rewritten in place
     void (*cb)(struct wintray_menu_item *);
     UINT flags;
 } built[MAX_ITEMS];
@@ -90,6 +90,15 @@ static void to_wide(const char *s, wchar_t *out, int size)
     }
 }
 
+// FNV-1a, enough to tell whether a menu item's text has changed.
+static UINT hash_text(const char *s)
+{
+    UINT h = 2166136261u;
+    while (*s)
+        h = (h ^ (unsigned char)*s++) * 16777619u;
+    return h;
+}
+
 static UINT menu_flags(const struct wintray_menu_item *m)
 {
     return MF_STRING | (m->disabled ? MF_GRAYED : 0) | (m->checked ? MF_CHECKED : 0);
@@ -114,7 +123,7 @@ static HMENU build_menu(struct wintray_menu_item *m, int depth)
             }
         } else if (item_count < MAX_ITEMS) {
             items[item_count] = m;
-            built[item_count].text = m->text;
+            built[item_count].hash = hash_text(m->text);
             built[item_count].cb = m->cb;
             built[item_count].flags = flags;
             AppendMenuW(menu, flags, ID_FIRST + item_count++, text);
@@ -129,7 +138,7 @@ static HMENU build_menu(struct wintray_menu_item *m, int depth)
 static int changed(UINT i)
 {
     const struct wintray_menu_item *m = items[i];
-    return m->text != built[i].text || m->cb != built[i].cb || menu_flags(m) != built[i].flags;
+    return hash_text(m->text) != built[i].hash || m->cb != built[i].cb || menu_flags(m) != built[i].flags;
 }
 
 // Returns the exe or DLL this file is compiled into. GetModuleHandleW(NULL)
@@ -153,6 +162,10 @@ static HICON load_icon(const struct wintray *t)
     int cx = GetSystemMetrics(SM_CXSMICON), cy = GetSystemMetrics(SM_CYSMICON);
     HICON h = NULL;
     if (t->icon_id) {
+        // A resource ID has 16 bits; MAKEINTRESOURCE would cut a larger one
+        // down to another icon's ID.
+        if ((unsigned)t->icon_id > 0xFFFF)
+            return NULL;
         // Look in the DLL wintray is built into first (if any), then in the exe.
         h = (HICON)LoadImageW(this_module(), MAKEINTRESOURCEW(t->icon_id),
                               IMAGE_ICON, cx, cy, 0);
@@ -243,9 +256,10 @@ static void cleanup(void)
 
 static LRESULT CALLBACK wnd_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
 {
-    // Another program can send WM_DESTROY without the window being destroyed.
-    // WM_NCDESTROY is the last message of a real DestroyWindow.
-    if (msg == WM_NCDESTROY && w == window)
+    // Another program can send WM_DESTROY or WM_NCDESTROY without the window
+    // being destroyed. A real DestroyWindow sends WM_DESTROY first, which runs
+    // cleanup() and clears hwnd, and WM_NCDESTROY last.
+    if (msg == WM_NCDESTROY && w == window && !hwnd)
         window = NULL;
     if (!hwnd)                       // still in CreateWindowW, or closing
         return DefWindowProcW(w, msg, wp, lp);

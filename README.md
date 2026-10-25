@@ -288,12 +288,14 @@ g++ -Os -s -mwindows -static -o app.exe app.cpp wintray.o -luser32 -lshell32
 ## API
 
 ```c
+struct wintray_menu_item;
+
 struct wintray {
     const char *icon_filepath;          // .ico file (full path), used if icon_id is 0
     const char *tooltip;                // UTF-8
     void (*cb)(struct wintray *);       // left click; if NULL, left click opens the menu
     struct wintray_menu_item *menu;     // ends with an item whose text is NULL
-    int icon_id;                        // icon resource ID, or 0
+    int icon_id;                        // icon resource ID (1 to 65535), or 0
 };
 
 struct wintray_menu_item {
@@ -326,9 +328,9 @@ struct wintray *wintray_get_instance(void);
   may run before the icon is shown, on the thread that will call
   `wintray_init()`.
 - The menu on screen stays as it is while it is open: `wintray_update()` waits
-  until it closes. If an update meanwhile gives an item another `text` or
-  `cb`, or changes its `checked` or `disabled`, a click on that item is
-  ignored, since it was meant for what the menu showed.
+  until it closes. If an update meanwhile changes an item's text (also when it
+  is rewritten in the same buffer), `cb`, `checked` or `disabled`, a click on
+  that item is ignored, since it was meant for what the menu showed.
 - While a callback shows a dialog or message box, the icon keeps working:
   another click calls `cb` again, inside the first call, and the menu still
   opens. Use a flag if a callback must not run twice at once.
