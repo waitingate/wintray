@@ -22,6 +22,8 @@
 //
 // The library keeps pointers to the wintray struct, the menu arrays and their
 // strings, so they must stay valid while the icon exists (static or global).
+// Menu items that a wintray_update() call took out of the menu may be freed
+// once it returns.
 //
 // wintray_update() does nothing while there is no icon window: before
 // wintray_init(), and after wintray_exit() or the window being closed, until the

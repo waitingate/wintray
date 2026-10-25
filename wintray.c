@@ -29,10 +29,9 @@ static int   menu_open;
 static int   update_pending;         // wintray_update() was called while the menu was open
 static UINT  wm_taskbar_created;
 static struct wintray_menu_item *items[MAX_ITEMS];  // indexed by command ID - ID_FIRST
-static struct {                      // each item as the menu shows it
-    UINT hash;                       // of the text, which may be rewritten in place
+static struct {                      // each item as the menu shows it, besides its text
     void (*cb)(struct wintray_menu_item *);
-    UINT flags;
+    UINT flags;                      // MF_GRAYED also when a submenu above it is grayed out
 } built[MAX_ITEMS];
 static UINT  item_count;
 static UINT  menu_count;
@@ -90,21 +89,13 @@ static void to_wide(const char *s, wchar_t *out, int size)
     }
 }
 
-// FNV-1a, enough to tell whether a menu item's text has changed.
-static UINT hash_text(const char *s)
-{
-    UINT h = 2166136261u;
-    while (*s)
-        h = (h ^ (unsigned char)*s++) * 16777619u;
-    return h;
-}
-
 static UINT menu_flags(const struct wintray_menu_item *m)
 {
     return MF_STRING | (m->disabled ? MF_GRAYED : 0) | (m->checked ? MF_CHECKED : 0);
 }
 
-static HMENU build_menu(struct wintray_menu_item *m, int depth)
+// above is MF_GRAYED inside a grayed-out submenu, whose items can't be reached.
+static HMENU build_menu(struct wintray_menu_item *m, int depth, UINT above)
 {
     HMENU menu = CreatePopupMenu();
     for (; m && m->text; m++) {
@@ -118,27 +109,17 @@ static HMENU build_menu(struct wintray_menu_item *m, int depth)
         if (m->submenu) {
             if (depth < MAX_DEPTH && menu_count < MAX_MENUS) {
                 menu_count++;
-                HMENU sub = build_menu(m->submenu, depth + 1);
+                HMENU sub = build_menu(m->submenu, depth + 1, above | (flags & MF_GRAYED));
                 AppendMenuW(menu, flags | MF_POPUP, (UINT_PTR)sub, text);
             }
         } else if (item_count < MAX_ITEMS) {
             items[item_count] = m;
-            built[item_count].hash = hash_text(m->text);
             built[item_count].cb = m->cb;
-            built[item_count].flags = flags;
+            built[item_count].flags = flags | above;
             AppendMenuW(menu, flags, ID_FIRST + item_count++, text);
         }
     }
     return menu;
-}
-
-// Whether item i has changed since the menu was built. An update while the
-// menu is open waits until it closes, so the user may have clicked an item
-// that has meanwhile become something else.
-static int changed(UINT i)
-{
-    const struct wintray_menu_item *m = items[i];
-    return hash_text(m->text) != built[i].hash || m->cb != built[i].cb || menu_flags(m) != built[i].flags;
 }
 
 // Returns the exe or DLL this file is compiled into. GetModuleHandleW(NULL)
@@ -206,6 +187,33 @@ static void show_icon(void)
         SetTimer(hwnd, RETRY_TIMER, 2000, NULL);
 }
 
+// An update came while the menu was open, so the clicked item may have changed
+// or left the menu, and a program may free an item it took out. So run the
+// update first, and return i only if command cmd still shows the same text,
+// state and callback, else MAX_ITEMS. The text it showed comes from the old
+// menu, never from the item.
+static UINT update_and_check(UINT i, UINT cmd)
+{
+    void (*cb)(struct wintray_menu_item *) = NULL;
+    UINT flags = 0;
+    wchar_t was[256], now[256];
+    int had = i < item_count;
+    was[0] = 0;
+    if (had) {
+        cb = built[i].cb;
+        flags = built[i].flags;
+        GetMenuStringW(hmenu, cmd, was, ARRAYSIZE(was), MF_BYCOMMAND);
+    }
+    wintray_update(g_tray);
+    if (!had || !hwnd || i >= item_count || built[i].cb != cb || built[i].flags != flags)
+        return MAX_ITEMS;
+    to_wide(items[i]->text, now, ARRAYSIZE(now));
+    for (int k = 0; was[k] == now[k]; k++)
+        if (!was[k])
+            return i;
+    return MAX_ITEMS;
+}
+
 static void show_menu(void)
 {
     if (menu_open)                   // icon clicked again while the menu is open
@@ -226,10 +234,10 @@ static void show_menu(void)
     }
     PostMessageW(hwnd, WM_NULL, 0, 0);
     UINT i = cmd - ID_FIRST;         // cmd 0 (nothing chosen) wraps around
-    if (i < item_count && items[i]->cb && !(update_pending && changed(i)))
-        items[i]->cb(items[i]);
     if (update_pending)
-        wintray_update(g_tray);
+        i = update_and_check(i, cmd);
+    if (i < item_count && items[i]->cb)
+        items[i]->cb(items[i]);
 }
 
 // Runs on WM_DESTROY, so it also cleans up when the window is closed by
@@ -367,7 +375,7 @@ void wintray_update(struct wintray *tray)
         DestroyMenu(hmenu);          // destroys the submenus too
     item_count = 0;
     menu_count = 0;
-    hmenu = build_menu(tray->menu, 0);
+    hmenu = build_menu(tray->menu, 0, 0);
 
     HICON old = own_icon;
     own_icon = load_icon(tray);

@@ -47,6 +47,7 @@ typedef struct {
 #define CP_UTF8          65001
 #define MB_ERR_INVALID_CHARS 0x0008
 #define MF_STRING        0x0000
+#define MF_BYCOMMAND     0x0000
 #define MF_GRAYED        0x0001
 #define MF_CHECKED       0x0008
 #define MF_POPUP         0x0010
@@ -70,6 +71,7 @@ int MultiByteToWideChar(UINT, DWORD, LPCSTR, int, wchar_t *, int);
 HMENU CreatePopupMenu(void);
 BOOL AppendMenuW(HMENU, UINT, UINT_PTR, LPCWSTR);
 BOOL DestroyMenu(HMENU);
+int GetMenuStringW(HMENU, UINT, wchar_t *, int, UINT);
 int GetSystemMetrics(int);
 HANDLE LoadImageW(HINSTANCE, LPCWSTR, UINT, int, int, UINT);
 HICON LoadIconW(HINSTANCE, LPCWSTR);

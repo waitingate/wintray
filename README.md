@@ -319,7 +319,9 @@ struct wintray *wintray_get_instance(void);
 ## Good to know
 
 - wintray keeps pointers to your `wintray` struct, menu arrays and strings, so
-  make them static or global, not local variables.
+  make them static or global, not local variables. Menu items that a
+  `wintray_update()` call took out of the menu are not used again, so they may
+  be freed once it returns.
 - In menu text, `&` underlines the next letter as a shortcut key. Write `&&`
   for a real `&`.
 - `wintray_update()` does nothing while there is no icon window: before
@@ -328,9 +330,13 @@ struct wintray *wintray_get_instance(void);
   may run before the icon is shown, on the thread that will call
   `wintray_init()`.
 - The menu on screen stays as it is while it is open: `wintray_update()` waits
-  until it closes. If an update meanwhile changes an item's text (also when it
-  is rewritten in the same buffer), `cb`, `checked` or `disabled`, a click on
-  that item is ignored, since it was meant for what the menu showed.
+  until it closes and then runs before the clicked item's `cb`. The click
+  counts only if the updated menu still shows, in the same place, an item with
+  the same text, `cb`, `checked` and `disabled` that isn't in a grayed-out
+  submenu, since it was meant for what the menu showed. `cb` then gets that
+  item. So an item whose text a timer keeps changing can't be clicked once a
+  change has come in while the menu was open: show such a value in a disabled
+  item of its own.
 - While a callback shows a dialog or message box, the icon keeps working:
   another click calls `cb` again, inside the first call, and the menu still
   opens. Use a flag if a callback must not run twice at once.

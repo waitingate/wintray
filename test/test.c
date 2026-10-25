@@ -139,6 +139,8 @@ static int n_popups, n_leaves, n_separators, last_leaf_id;
 // submenu's item (-1 for no text).
 static UINT got_flags[ID_FIRST + MAX_ITEMS];
 static int got_len[ID_FIRST + MAX_ITEMS], sub_len[MAXM];
+static int got_menu[ID_FIRST + MAX_ITEMS];          // the menu each command ID went into
+static wchar_t got_text[ID_FIRST + MAX_ITEMS][256];
 HMENU CreatePopupMenu(void)
 {
     int id = ++menus_created;
@@ -160,6 +162,11 @@ BOOL AppendMenuW(HMENU m, UINT f, UINT_PTR id, LPCWSTR t)
         CHECK(id >= ID_FIRST && id < ID_FIRST + MAX_ITEMS);
         got_flags[id] = f;
         got_len[id] = len;
+        got_menu[id] = mi;
+        int k = 0;
+        for (; t && t[k] && k < 255; k++)
+            got_text[id][k] = t[k];
+        got_text[id][k] = 0;
         n_leaves++;
         last_leaf_id = (int)id;
     }
@@ -171,6 +178,19 @@ static int below(int i, int anc)
         if (p == anc)
             return 1;
     return 0;
+}
+// By command ID it looks in m and in its submenus, as Windows does.
+int GetMenuStringW(HMENU m, UINT id, wchar_t *s, int max, UINT f)
+{
+    int mi = (int)(uintptr_t)m, n = 0;
+    CHECK(f == MF_BYCOMMAND && max > 0 && m_live[mi]);
+    int found = id >= ID_FIRST && id < ID_FIRST + MAX_ITEMS && m_live[got_menu[id]] &&
+                (got_menu[id] == mi || below(got_menu[id], mi));
+    CHECK(found);                           // wintray asks only for items its menu has
+    for (; found && got_text[id][n] && n < max - 1; n++)
+        s[n] = got_text[id][n];
+    s[n] = 0;
+    return n;
 }
 BOOL DestroyMenu(HMENU m)
 {
@@ -699,13 +719,15 @@ static void hook_update(void)
     CHECK(menus_created == before && update_pending == 1);  // waits for the menu to close
 }
 static void hook_exit(void) { wintray_exit(); CHECK(end_menu_called && hwnd == NULL); }
-static void do_update(void) { wintray_update(g_tray); }
+static int menus_at_cb;                         // menus_created when do_update ran
+static void do_update(void) { menus_at_cb = menus_created; wintray_update(g_tray); }
 
 static struct wintray_menu_item sub1[] = {{"Inner", 0, 0, item_cb, NULL}, {NULL, 0, 0, NULL, NULL}};
 static struct wintray_menu_item flagm[] = {
     {"Off", 1, 0, item_cb, NULL}, {"On", 0, 1, item_cb, NULL}, {"-x", 0, 0, item_cb, NULL},
     {"Info", 0, 0, NULL, NULL}, {"Sub", 0, 0, NULL, sub1}, {NULL, 0, 0, NULL, NULL}};
 static struct wintray t_flags = {NULL, "t", NULL, flagm, 1};
+static void gray_sub(void) { flagm[4].disabled = 1; wintray_update(&t_flags); }
 
 // Items changed in place while the menu is open, then an update, as a timer may do.
 // B keeps its check mark.
@@ -726,6 +748,18 @@ static void rewrite_a(void) { strcpy(label, "X"); wintray_update(&t_dyn); }
 static void recall_a(void) { dyn[0].cb = other_cb; wintray_update(&t_dyn); }
 static void gray_a(void) { dyn[0].disabled = 1; wintray_update(&t_dyn); }
 static void check_a(void) { dyn[0].checked = 1; wintray_update(&t_dyn); }
+static char copy_a[] = "A";                     // the same text in another buffer
+static void move_a(void) { dyn[0].text = copy_a; wintray_update(&t_dyn); }
+static void nest_a(void) { dyn[0].submenu = sub1; wintray_update(&t_dyn); }
+static void end_at_a(void) { dyn[0].text = NULL; wintray_update(&t_dyn); }   // a NULL text ends the menu
+static void end_at_b(void) { dyn[1].text = NULL; wintray_update(&t_dyn); }
+static char *heap_b;                            // B's text, freed while the menu is open
+static void cut_and_free(void) { dyn[0].text = NULL; free(heap_b); wintray_update(&t_dyn); }
+static struct wintray_menu_item dyn2[] = {      // dyn's items in another array
+    {"A", 0, 0, item_cb, NULL}, {"B", 0, 1, item_cb, NULL}, {NULL, 0, 0, NULL, NULL}};
+static struct wintray t_dyn2 = {NULL, "t", NULL, dyn2, 1};
+static void copy_dyn(void) { wintray_update(&t_dyn2); }
+static void switch_to_pick(void) { wintray_update(&t_pick); }
 static void update_alt(void) { wintray_update(&t_alt); }
 static void reset_dyn(void)
 {
@@ -748,7 +782,7 @@ static void test_menu(void)
     track_hook = hook_update; track_ret = ID_FIRST; item_hook = do_update; item_calls = 0;
     right_click();
     CHECK(item_calls == 1 && update_pending == 0);  // item cb updates, plus a pending update
-    CHECK(menus_created == before + 1);             // rebuilt once, not twice
+    CHECK(menus_at_cb == before + 1 && menus_created == before + 2);   // the pending one first
     track_ret = 0;
     track_hook = hook_exit; right_click();          // wintray_exit() while the menu is open
     closed();
@@ -780,11 +814,19 @@ static void test_menu(void)
     track_ret = ID_FIRST + 3; item_calls = 0;
     right_click();                                  // an item without a callback
     CHECK(item_calls == 0);
+    track_ret = ID_FIRST + 4; right_click();
+    CHECK(item_calls == 1 && last_item == &sub1[0]);   // "Inner", in the submenu
+    track_hook = hook_update; right_click();
+    CHECK(item_calls == 2 && last_item == &sub1[0]);   // an update that changed nothing
+    track_hook = gray_sub; right_click();
+    CHECK(item_calls == 2);                         // its submenu was grayed out meanwhile
+    flagm[4].disabled = 0;
     stop();
 
-    // A click on an item that an update changed while the menu was open is
-    // dropped, since the user clicked what it was before. One that didn't
-    // change, or changed without an update, still counts.
+    // An update made while the menu was open runs when it closes, before the
+    // click, and the click counts only if the same command still shows the same
+    // text, state and callback, since the user meant what the menu showed. A
+    // change made without an update counts as it is.
     start(&t_dyn);
     item_calls = other_calls = 0;
     track_hook = rename_a; track_ret = ID_FIRST; right_click();
@@ -805,10 +847,30 @@ static void test_menu(void)
     track_hook = rewrite_a; track_ret = ID_FIRST; right_click();
     CHECK(item_calls == 1);                         // the same buffer, rewritten
     reset_dyn();
+    track_hook = move_a; track_ret = ID_FIRST; right_click();
+    CHECK(item_calls == 2 && last_item == &dyn[0]); // the same text from another buffer
+    reset_dyn();
+    track_hook = nest_a; track_ret = ID_FIRST; right_click();
+    CHECK(item_calls == 2);                         // "A" opens a submenu now
+    reset_dyn();
+    track_hook = end_at_a; track_ret = ID_FIRST + 1; right_click();
+    CHECK(item_calls == 2 && item_count == 0);      // the menu ends before "B" now
+    reset_dyn();
+    track_hook = end_at_b; right_click();
+    CHECK(item_calls == 2 && update_pending == 0 && item_count == 1);   // dropped, but updated
+    heap_b = malloc(2); strcpy(heap_b, "B"); dyn[1].text = heap_b; wintray_update(&t_dyn);
+    track_hook = cut_and_free; right_click();
+    CHECK(item_calls == 2);                         // and its freed text isn't read
+    dyn[1].text = "B"; reset_dyn();
+    track_hook = copy_dyn; right_click();
+    CHECK(item_calls == 3 && last_item == &dyn2[1]);   // the same item in another array
+    track_hook = switch_to_pick; right_click();
+    CHECK(item_calls == 3 && other_calls == 0);     // another menu, with "Second" there now
+    reset_dyn();
     track_ret = ID_FIRST; right_click();
-    CHECK(item_calls == 2);                         // no update while it was open
+    CHECK(item_calls == 4);                         // no update while it was open
     track_hook = rename_a_quietly; right_click();
-    CHECK(item_calls == 3);                         // changed, but no update came: it counts
+    CHECK(item_calls == 5 && last_item == &dyn[0]); // changed, but no update came: it counts
     stop();
 }
 
@@ -972,6 +1034,13 @@ static void test_explorer(void)
         if (fails > before)
             printf("    in case %d\n", i);
     }
+
+    start(&t_menu);                                 // closed during the update the menu waited for
+    track_hook = hook_update; track_ret = ID_FIRST; item_calls = 0;
+    notify_on = NIM_MODIFY; notify_hook = close_window;
+    right_click();
+    CHECK(item_calls == 0);                         // so the click doesn't run
+    closed();
 }
 
 static void test_loop(void)
