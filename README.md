@@ -324,11 +324,13 @@ struct wintray *wintray_get_instance(void);
   be freed once it returns.
 - In menu text, `&` underlines the next letter as a shortcut key. Write `&&`
   for a real `&`.
-- `wintray_update()` does nothing while there is no icon window: before
-  `wintray_init()`, and after `wintray_exit()` or the window being closed,
-  until the next `wintray_init()`. So code that fills in the tooltip and menu
-  may run before the icon is shown, on the thread that will call
-  `wintray_init()`.
+- `wintray_update()` and `wintray_exit()` do nothing while there is no icon
+  window: until a `wintray_init()` succeeds, and after `wintray_exit()` or the
+  window being closed, until the next one. So code that fills in the tooltip
+  and menu may run before the icon is shown, on the thread that will call
+  `wintray_init()`. A second `wintray_exit()` posts no second `WM_QUIT`, and
+  `wintray_loop()` after a failed `wintray_init()` waits like any message
+  loop, so check what `wintray_init()` returns.
 - The menu on screen stays as it is while it is open: `wintray_update()` waits
   until it closes and then runs before the clicked item's `cb`. The click
   counts only if the updated menu still shows, in the same place, an item with

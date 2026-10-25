@@ -25,10 +25,13 @@
 // Menu items that a wintray_update() call took out of the menu may be freed
 // once it returns.
 //
-// wintray_update() does nothing while there is no icon window: before
-// wintray_init(), and after wintray_exit() or the window being closed, until the
-// next wintray_init(). So code that fills in the tooltip and menu may run before
-// the icon is shown, on the thread that will call wintray_init().
+// wintray_update() and wintray_exit() do nothing while there is no icon window:
+// until a wintray_init() succeeds, and after wintray_exit() or the window being
+// closed, until the next one. So code that fills in the tooltip and menu may run
+// before the icon is shown, on the thread that will call wintray_init(). A second
+// wintray_exit() posts no second WM_QUIT, and wintray_loop() after a failed
+// wintray_init() waits like any message loop, so check what wintray_init()
+// returns.
 //
 // Limits: one icon per process, 256 menu items, 256 submenus, 8 submenu levels,
 // 255 UTF-16 units of text per menu item and 127 for the tooltip (most emoji take

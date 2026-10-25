@@ -655,23 +655,27 @@ static void closed_at(int line, int blocking)
 #define closed() closed_at(__LINE__, 0)
 #define stop() (wintray_exit(), closed())
 
-// Without an icon window, wintray_update() must do nothing at all: no menu, no
-// icon, no Shell_NotifyIconW call, no change to nid, and wintray_get_instance()
-// stays as it was.
-static void update_without_window_at(int line)
+// Without an icon window, wintray_update() and wintray_exit() must do nothing at
+// all: no menu, no icon, no Shell_NotifyIconW call, no change to nid, no WM_QUIT,
+// the window class stays as it is, and wintray_get_instance() as it was.
+static void without_window_at(int line)
 {
     static struct wintray other = {NULL, "other", NULL, menu1, 1};
     struct wintray *instance = wintray_get_instance();
+    struct cls *c = find_class(CLASS_NAME, this_module());
     NOTIFYICONDATAW was;
     memcpy(&was, &nid, sizeof nid);
     int before = fails, menus = menus_created, icons = icons_created, calls = notify_calls;
+    int quits = quit_posted;
     wintray_update(&other);
+    wintray_exit();
     CHECK(menus_created == menus && icons_created == icons && notify_calls == calls);
     CHECK(wintray_get_instance() == instance && !memcmp(&was, &nid, sizeof nid));
+    CHECK(quit_posted == quits && find_class(CLASS_NAME, this_module()) == c);
     if (fails > before)
         printf("    called from line %d\n", line);
 }
-#define update_without_window() update_without_window_at(__LINE__)
+#define without_window() without_window_at(__LINE__)
 // A click, as Explorer sends it: with the callback message the icon was given.
 static void ev(UINT e)
 {
@@ -686,7 +690,7 @@ static void right_click(void) { ev(WM_RBUTTONDOWN); ev(WM_RBUTTONUP); }
 static void test_clicks(void)
 {
     printf("clicks\n");
-    update_without_window();                        // before the first wintray_init()
+    without_window();                               // before the first wintray_init()
     start(&t_cb);
     cb_calls = 0; left_click();
     CHECK(cb_calls == 1);                           // single click
@@ -888,13 +892,13 @@ static void test_closing(void)
     notify_on = NIM_DELETE; notify_hook = on_delete;   // clicks while the icon is being removed
     stop();
     CHECK(cb_calls == 0 && track_calls == 0 && ghosts == 0);
-    update_without_window();                        // after wintray_exit()
+    without_window();                               // after wintray_exit()
 
     start(&t_menu);                                 // closed from outside
     wnd_proc(W, WM_CLOSE, 0, 0);                    // as taskkill without /f sends it
     CHECK(window == NULL);                          // forgotten once it is really gone
     closed();
-    update_without_window();                        // after the window was closed
+    without_window();                               // after the window was closed
     CHECK(find_class(CLASS_NAME, this_module()) != NULL);   // class still registered
     start(&t_menu);                                 // init works again
     stop();
@@ -942,6 +946,7 @@ static void test_closing(void)
     fail_create = 1;                                // no window: init fails cleanly
     CHECK(wintray_init(&t_menu) == -1 && hwnd == NULL);
     fail_create = 0;
+    without_window();                               // after a failed wintray_init()
 }
 
 static void test_icons(void)
