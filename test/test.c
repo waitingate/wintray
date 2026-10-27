@@ -135,9 +135,9 @@ int MultiByteToWideChar(UINT cp, DWORD fl, LPCSTR src, int n, wchar_t *out, int 
 static int m_live[MAXM], m_parent[MAXM];
 static int menus_created, menus_live, on_screen;
 static int n_popups, n_leaves, n_separators, last_leaf_id;
-// What AppendMenuW got for each command ID, and the text length of each
-// submenu's item (-1 for no text).
-static UINT got_flags[ID_FIRST + MAX_ITEMS];
+// What AppendMenuW got for each command ID, and the text length (-1 for no
+// text) and flags of each submenu's item.
+static UINT got_flags[ID_FIRST + MAX_ITEMS], sub_flags[MAXM];
 static int got_len[ID_FIRST + MAX_ITEMS], sub_len[MAXM];
 static int got_menu[ID_FIRST + MAX_ITEMS];          // the menu each command ID went into
 static wchar_t got_text[ID_FIRST + MAX_ITEMS][MAX_TEXT];
@@ -155,6 +155,7 @@ BOOL AppendMenuW(HMENU m, UINT f, UINT_PTR id, LPCWSTR t)
     if (f & MF_POPUP) {
         m_parent[(int)id] = mi;
         sub_len[(int)id] = len;
+        sub_flags[(int)id] = f;
         n_popups++;
     } else if (f & MF_SEPARATOR) {
         n_separators++;
@@ -242,7 +243,11 @@ HANDLE LoadImageW(HINSTANCE h, LPCWSTR name, UINT type, int cx, int cy, UINT fl)
     if (fl & LR_LOADFROMFILE) {
         file_loads++;
         last_path_len = wlen(name);
-        ok = name[0] == 'g';                // "good.ico" exists
+        LPCWSTR file = name;                // files whose names start with g exist
+        for (LPCWSTR p = name; *p; p++)
+            if (*p == '\\' || *p == '/')
+                file = p + 1;
+        ok = file[0] == 'g';
     } else if (h == DLL) {
         ok = icon_in_dll && res == 1;       // the DLL has icon 1
         from_dll += ok;
@@ -278,7 +283,6 @@ int GetSystemMetrics(int i) { (void)i; return 16; }
 /* ---------------- classes and windows ---------------- */
 // Messages that only the fakes and tests use.
 #define WM_CREATE          0x0001
-#define WM_CLOSE           0x0010
 #define WM_QUERYENDSESSION 0x0011
 #define WM_NCCREATE        0x0081
 #define WM_SYSKEYDOWN      0x0104
@@ -445,6 +449,9 @@ void PostQuitMessage(int c) { (void)c; quit_posted++; }
 // comes at once.
 LRESULT DefWindowProcW(HWND h, UINT m, WPARAM w, LPARAM l)
 {
+    CHECK(WIN(h).c != NULL);                // a window that was created
+    if (!WIN(h).c)
+        return 0;
     if (m == WM_NCCREATE || m == WM_QUERYENDSESSION)
         return TRUE;                        // go on creating the window; the session may end
     if (m == WM_SYSKEYDOWN && w == VK_F4 && (l & 1 << 29) && !(WIN(h).c->style & CS_NOCLOSE))
@@ -824,10 +831,12 @@ static void test_menu(void)
     CHECK(got_flags[ID_FIRST] == MF_GRAYED && got_flags[ID_FIRST + 1] == MF_CHECKED);
     CHECK(got_flags[ID_FIRST + 2] == MF_STRING && n_separators == 0);   // "-x" is an item
     CHECK(got_len[ID_FIRST] == 3 && got_len[ID_FIRST + 2] == 2 && sub_len[menus_created] == 3);
+    CHECK(sub_flags[menus_created] == MF_POPUP);
     CHECK(click(NULL, ID_FIRST + 3) == 0);          // an item without a callback
     CHECK(click(NULL, ID_FIRST + 4) == 1 && last_item == &sub1[0]);   // "Inner", in the submenu
     CHECK(click(hook_update, ID_FIRST + 4) == 1 && last_item == &sub1[0]);   // an update that changed nothing
     CHECK(click(gray_sub, ID_FIRST + 4) == 0);      // its submenu was grayed out meanwhile
+    CHECK(sub_flags[menus_created] == (MF_POPUP | MF_GRAYED));   // and shows it
     stop();
 
     // An update made while the menu was open runs when it closes, before the
@@ -861,6 +870,7 @@ static void on_delete(void)
     wnd_proc(W, TASKBAR_CREATED, 0, 0);
 }
 static void exit_again(void) { wintray_exit(); CHECK(wintray_init(&t_menu) == -1); }
+static void close_window(void) { wnd_proc(W, WM_CLOSE, 0, 0); }
 static void test_closing(void)
 {
     printf("closing\n");
@@ -915,13 +925,24 @@ static void test_closing(void)
     wnd_proc(W, WM_NCDESTROY, 0, 0);
     CHECK(window == W);                             // doesn't make wintray forget the window
     stop();
+    start(&t_menu);                                 // nor do both, one after the other
+    wnd_proc(W, WM_DESTROY, 0, 0);
+    wnd_proc(W, WM_NCDESTROY, 0, 0);
+    CHECK(window == W && WIN(W).alive);
+    wintray_exit();                                 // so exit still destroys the window
+    CHECK(!WIN(W).alive && find_class(CLASS_NAME, this_module()) == NULL);
+    closed();
 
     start(&t_menu);                                 // exit and init again while the
     notify_on = NIM_DELETE; notify_hook = exit_again;   // window is being destroyed
     stop();
+    start(&t_menu);                                 // a WM_CLOSE then, which mustn't
+    notify_on = NIM_DELETE; notify_hook = close_window;   // destroy it a second time
+    stop();
 
-    fail_create = 1;                                // no window: init fails cleanly
+    fail_create = 1;                                // no window: init fails cleanly,
     CHECK(wintray_init(&t_menu) == -1 && hwnd == NULL);
+    CHECK(find_class(CLASS_NAME, this_module()) == NULL);   // with no class left behind
     fail_create = 0;
     without_window();                               // after a failed wintray_init()
 }
@@ -954,18 +975,31 @@ static void test_icons(void)
     wintray_update(&t);
     CHECK(tray_icon() == SHARED);                  // no icon anywhere: shared default
     wintray_update(&t);                             // and it's never destroyed
-    t.icon_id = 0; t.icon_filepath = "good.ico"; wintray_update(&t);
+    t.icon_id = 0; t.icon_filepath = "C:\\good.ico"; wintray_update(&t);
     CHECK(loaded());
-    t.icon_filepath = "bad.ico"; wintray_update(&t);
+    t.icon_filepath = "C:\\bad.ico"; wintray_update(&t);
     CHECK(tray_icon() == SHARED);
+    static const char *const full[] = {"c:/good.ico", "\\\\server\\share\\good.ico", "\\\\?\\C:\\good.ico"};
+    for (int i = 0; i < (int)ARRAYSIZE(full); i++) {
+        t.icon_filepath = full[i]; wintray_update(&t);
+        CHECK(loaded());                            // a full path in any form
+    }
+    static const char *const relative[] = {"good.ico", "g\\good.ico", "C:good.ico", "\\good.ico"};
+    file_loads = 0;                                 // Windows would search for these,
+    for (int i = 0; i < (int)ARRAYSIZE(relative); i++) {
+        t.icon_filepath = relative[i]; wintray_update(&t);
+        CHECK(tray_icon() == SHARED);               // so they load nothing
+    }
+    CHECK(file_loads == 0);
     static char path[MAX_PATH + 1];                 // a path is used whole or not at all:
-    memset(path, 'g', MAX_PATH - 1);                // the longest that fits
+    memcpy(path, "C:\\", 3);
+    memset(path + 3, 'g', MAX_PATH - 4);            // the longest that fits
     file_loads = 0; t.icon_filepath = path; wintray_update(&t);
     CHECK(file_loads == 1 && last_path_len == MAX_PATH - 1 && loaded());
     path[MAX_PATH - 1] = 'g';                       // one unit longer: not cut short
     wintray_update(&t);
     CHECK(file_loads == 1 && tray_icon() == SHARED);
-    t.icon_filepath = "g\xC3(.ico";                 // not UTF-8: no bytes replaced either
+    t.icon_filepath = "C:\\g\xC3(.ico";             // not UTF-8: no bytes replaced either
     wintray_update(&t);
     CHECK(file_loads == 1 && tray_icon() == SHARED);
     t.icon_id = 2; icon_in_exe = icon_in_dll = 1;   // only the exe has icon 2
@@ -974,7 +1008,7 @@ static void test_icons(void)
     t.icon_id = 65537;                              // over 16 bits: no icon, rather than icon 1
     wintray_update(&t);
     CHECK(tray_icon() == SHARED);
-    t.icon_id = 1; icon_in_dll = 0; t.icon_filepath = "good.ico"; file_loads = 0;
+    t.icon_id = 1; icon_in_dll = 0; t.icon_filepath = "C:\\good.ico"; file_loads = 0;
     wintray_update(&t);
     CHECK(loaded() && last_res == 1 && file_loads == 0);   // icon_id, not the file
     for (int i = 0; i < 100; i++)
@@ -985,7 +1019,6 @@ static void test_icons(void)
     CHECK(this_module() == (mode_dll ? DLL : EXE));
 }
 
-static void close_window(void) { wnd_proc(W, WM_CLOSE, 0, 0); }
 static void test_explorer(void)
 {
     printf("explorer\n");

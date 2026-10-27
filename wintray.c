@@ -21,9 +21,10 @@
 static struct wintray *g_tray;
 static NOTIFYICONDATAW nid;
 static HWND  hwnd;
-static HWND  window;                 // hwnd until WM_NCDESTROY; a WM_DESTROY that another
-                                     // program sends clears only hwnd
+static HWND  window;                 // hwnd until destroy_window() destroys it; messages
+                                     // that another program sends clear only hwnd
 static int   closing;                // cleanup() is running
+static int   destroying;             // inside destroy_window()
 static HMENU hmenu;
 static HICON own_icon;               // the icon in nid if we loaded it, else NULL
 static int   menu_open;
@@ -147,6 +148,17 @@ static HINSTANCE this_module(void)
     return m;
 }
 
+// "C:\..." or "C:/...", or a network or device path ("\\server\...", "\\?\...").
+// LoadImageW looks for any other path in the program's folder, the current
+// folder and every folder on the PATH, where another program may have put a
+// file of that name.
+static int full_path(const wchar_t *p)
+{
+    if ((p[0] == '\\' || p[0] == '/') && (p[1] == '\\' || p[1] == '/'))
+        return 1;
+    return (unsigned)((p[0] | 0x20) - 'a') < 26 && p[1] == ':' && (p[2] == '\\' || p[2] == '/');
+}
+
 // The icon from icon_id or icon_filepath, or NULL.
 static HICON load_icon(const struct wintray *t)
 {
@@ -168,7 +180,8 @@ static HICON load_icon(const struct wintray *t)
         // replaced, could name another file. MultiByteToWideChar fails for both.
         const char *s = t->icon_filepath;
         wchar_t path[MAX_PATH];
-        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, path, MAX_PATH))
+        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, path, MAX_PATH) &&
+            full_path(path))
             h = (HICON)LoadImageW(NULL, path, IMAGE_ICON, cx, cy, LR_LOADFROMFILE);
     }
     return h;
@@ -269,13 +282,27 @@ static void cleanup(void)
     closing = 0;
 }
 
+// Another program can send WM_DESTROY and WM_NCDESTROY without the window being
+// destroyed, so window is forgotten only in a DestroyWindow that wintray called.
+static void destroy_window(HWND w)
+{
+    destroying++;
+    DestroyWindow(w);
+    destroying--;
+}
+
 static LRESULT CALLBACK wnd_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
 {
-    // Another program can send WM_DESTROY or WM_NCDESTROY without the window
-    // being destroyed. A real DestroyWindow sends WM_DESTROY first, which runs
-    // cleanup() and clears hwnd, and WM_NCDESTROY last.
-    if (msg == WM_NCDESTROY && w == window && !hwnd)
+    if (msg == WM_NCDESTROY && w == window && destroying)
         window = NULL;
+    // WM_CLOSE (taskkill without /f, an installer, SC_CLOSE) does what
+    // DefWindowProc would, through destroy_window(). While cleanup() runs, the
+    // window is already on its way out.
+    if (msg == WM_CLOSE) {
+        if (!closing)
+            destroy_window(w);
+        return 0;
+    }
     if (!hwnd)                       // still in CreateWindowW, or closing
         return DefWindowProcW(w, msg, wp, lp);
     if (msg == WM_TRAY) {
@@ -315,7 +342,7 @@ int wintray_init(struct wintray *tray)
     if (!tray || hwnd || closing)
         return -1;
     if (window)                      // left over by a WM_DESTROY from another program
-        DestroyWindow(window);
+        destroy_window(window);
     wm_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
 
     // Hidden window for the icon messages. Not a message-only window, because
@@ -334,8 +361,10 @@ int wintray_init(struct wintray *tray)
     if (!RegisterClassW(&wc))
         return -1;
     hwnd = CreateWindowW(wc.lpszClassName, L"", 0, 0, 0, 0, 0, NULL, NULL, wc.hInstance, NULL);
-    if (!hwnd)
+    if (!hwnd) {
+        UnregisterClassW(wc.lpszClassName, wc.hInstance);   // or it may outlive a DLL
         return -1;
+    }
     window = hwnd;
     // Otherwise an elevated process never gets TaskbarCreated (UIPI).
     ChangeWindowMessageFilterEx(hwnd, wm_taskbar_created, MSGFLT_ALLOW, NULL);
@@ -397,7 +426,7 @@ void wintray_exit(void)
     // window, not hwnd: after a WM_DESTROY from another program, the window is
     // still there. Not while cleanup() runs: that is usually inside DestroyWindow.
     if (window && !closing) {
-        DestroyWindow(window);       // the rest happens in WM_DESTROY
+        destroy_window(window);      // the rest happens in WM_DESTROY
         // Windows doesn't unregister a DLL's classes when the DLL is unloaded.
         UnregisterClassW(CLASS_NAME, this_module());
     }

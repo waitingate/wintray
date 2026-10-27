@@ -32,6 +32,7 @@ typedef struct {
 
 #define WM_NULL          0x0000
 #define WM_DESTROY       0x0002
+#define WM_CLOSE         0x0010
 #define WM_QUIT          0x0012
 #define WM_NCDESTROY     0x0082
 #define WM_TIMER         0x0113

@@ -82,13 +82,15 @@ gcc -Os -s -mwindows -static -o app.exe app.c wintray.c app_rc.o -luser32 -lshel
 ```
 
 Or load it from a file at run time with `.icon_filepath`. Give the full path,
-such as `"C:\\Tools\\icon.ico"`: the program doesn't always start in its own
-folder.
+such as `"C:\\Tools\\icon.ico"`. A relative path loads no icon: Windows would
+look for it in the current folder and in every folder on the PATH, where
+another program may have put a file of that name.
 
 If the icon can't be loaded, the tray shows the standard icon, and wintray
 reports no error. That happens with an `icon_id` that isn't in the program, a
-missing file, and a path that is too long (see [Limits](#limits)) or not valid
-UTF-8: such a path is never cut short, so it can't name another file.
+missing file, a relative path, and a path that is too long (see
+[Limits](#limits)) or not valid UTF-8: such a path is never cut short, so it
+can't name another file.
 
 ## Examples
 
@@ -342,6 +344,10 @@ struct wintray *wintray_get_instance(void);
 - While a callback shows a dialog or message box, the icon keeps working:
   another click calls `cb` again, inside the first call, and the menu still
   opens. Use a flag if a callback must not run twice at once.
+- In a program that runs as administrator, other programs can still send the
+  icon's click messages, since Windows lets them through for tray icons. So
+  they can run `cb` or open the menu, though choosing an item still takes the
+  user. Don't let `cb` start anything that an ordinary program shouldn't.
 - If Explorer restarts, the icon comes back on its own.
 - `wintray_exit()` posts `WM_QUIT`, which ends every message loop on the
   thread: a `MessageBox` shown after it in the same callback closes at once.
@@ -361,7 +367,9 @@ struct wintray *wintray_get_instance(void);
   leaves out the default libraries. I haven't tried MSVC yet. Without the C
   runtime, turn off its checks that call into the runtime: `/GS-`, and in a
   new Visual Studio project also the SDL checks (`/sdl-`), the run-time
-  checks (no `/RTC1`) and Just My Code (`/JMC-`).
+  checks (no `/RTC1`) and Just My Code (`/JMC-`). With GCC, leave out
+  `-fstack-protector-strong` and `-fstack-protector-all`, which need the
+  runtime too.
 
 ## Limits
 
@@ -374,9 +382,10 @@ to 259 units; a longer one isn't cut, it loads no icon. Windows 7 or later.
 ## Coming from zserge/tray or dmikushin/tray
 
 Replace `tray_` with `wintray_` and `struct tray` with `struct wintray`.
-Strings are UTF-8 instead of the ANSI code page, `icon_filepath` has to be an
-.ico file (the originals use `ExtractIconEx`, which also takes an .exe or
-.dll), and `struct wintray` has an extra `icon_id` field at the end.
+Strings are UTF-8 instead of the ANSI code page, `icon_filepath` has to be the
+full path of an .ico file (the originals use `ExtractIconEx`, which also takes
+an .exe or .dll, and a relative path), and `struct wintray` has an extra
+`icon_id` field at the end.
 
 zserge/tray needs a few more changes: `icon` is now `icon_filepath`,
 `struct tray_menu` is now `struct wintray_menu_item` (without the `context`
