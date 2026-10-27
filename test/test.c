@@ -252,7 +252,7 @@ HANDLE LoadImageW(HINSTANCE h, LPCWSTR name, UINT type, int cx, int cy, UINT fl)
         ok = icon_in_dll && res == 1;       // the DLL has icon 1
         from_dll += ok;
     } else if (h == EXE) {
-        ok = icon_in_exe && (res == 1 || res == 2);   // the exe has icons 1 and 2
+        ok = icon_in_exe && (res == 1 || res == 2 || res == 65535);   // the exe has icons 1, 2, 65535
         from_exe += ok;
     }
     if (ok && !(fl & LR_LOADFROMFILE))
@@ -286,8 +286,6 @@ int GetSystemMetrics(int i) { (void)i; return 16; }
 #define WM_QUERYENDSESSION 0x0011
 #define WM_NCCREATE        0x0081
 #define WM_SYSKEYDOWN      0x0104
-#define WM_SYSCOMMAND      0x0112
-#define SC_CLOSE           0xF060
 #define VK_F4              0x73
 struct cls { int used; LPCWSTR name; HINSTANCE inst; WNDPROC proc; UINT style; int windows; };
 static struct cls classes[8];
@@ -317,7 +315,7 @@ BOOL UnregisterClassW(LPCWSTR name, HINSTANCE inst)
     c->used = 0;
     return TRUE;
 }
-struct win { int alive, dying; struct cls *c; };   // alive until DestroyWindow starts
+struct win { int alive, dying; struct cls *c; int shown; };   // alive until DestroyWindow starts
 static struct win wins[1000];
 static int nwins;
 static HWND timer_hwnd;                     // the window timer that is set, if any
@@ -332,7 +330,7 @@ HWND CreateWindowW(LPCWSTR cls, LPCWSTR title, DWORD st, int x, int y, int w, in
     if (!c || fail_create)
         return NULL;
     HWND hw = (HWND)(uintptr_t)(++nwins * 16);
-    WIN(hw) = (struct win){1, 0, c};
+    WIN(hw) = (struct win){1, 0, c, 0};
     c->windows++;
     if (!c->proc(hw, WM_NCCREATE, 0, 0)) {  // FALSE: no window
         WIN(hw).alive = 0;
@@ -358,6 +356,15 @@ BOOL DestroyWindow(HWND hw)
     WIN(hw).c->windows--;
     KillTimer(hw, timer_id);                // a window's timers go with it
     return TRUE;
+}
+BOOL IsWindow(HWND hw)                      // also while it is being destroyed
+{
+    return hw && (uintptr_t)hw / 16 < ARRAYSIZE(wins) && (WIN(hw).alive || WIN(hw).dying);
+}
+LONG_PTR GetWindowLongPtrW(HWND hw, int i)
+{
+    CHECK(i == GWLP_WNDPROC && IsWindow(hw));
+    return IsWindow(hw) ? (LONG_PTR)WIN(hw).c->proc : 0;
 }
 
 /* ---------------- Explorer ---------------- */
@@ -458,6 +465,9 @@ LRESULT DefWindowProcW(HWND h, UINT m, WPARAM w, LPARAM l)
         return WIN(h).c->proc(h, WM_SYSCOMMAND, SC_CLOSE, 0);   // Alt+F4
     if (m == WM_SYSCOMMAND && (w & 0xFFF0) == SC_CLOSE)
         return WIN(h).c->proc(h, WM_CLOSE, 0, 0);
+    if (m == WM_SYSCOMMAND && ((w & 0xFFF0) == SC_MINIMIZE || (w & 0xFFF0) == SC_MAXIMIZE ||
+                               (w & 0xFFF0) == SC_RESTORE))
+        WIN(h).shown = 1;                   // a hidden window shows, with a taskbar button
     if (m == WM_CLOSE)
         DestroyWindow(h);
     return 0;
@@ -697,7 +707,8 @@ static void right_click(void) { ev(WM_RBUTTONDOWN); ev(WM_RBUTTONUP); }
 static void test_clicks(void)
 {
     printf("clicks\n");
-    without_window();                               // before the first wintray_init()
+    CHECK(wintray_get_instance() == NULL);          // before the first wintray_init()
+    without_window();
     start(&t_cb);
     cb_calls = 0; left_click();
     CHECK(cb_calls == 1);                           // single click
@@ -709,6 +720,10 @@ static void test_clicks(void)
     CHECK(cb_calls == 2);                           // a DBLCLK without its UP doesn't eat the next click
     cb_calls = 0; cb_hook = second_click; left_click();
     CHECK(cb_calls == 1);                           // 2nd click handled while cb shows a dialog
+    cb_calls = 0; cb_hook = left_click; left_click();
+    CHECK(cb_calls == 2);                           // another click then runs cb inside the first
+    track_calls = 0; cb_hook = right_click; left_click();
+    CHECK(track_calls == 1);                        // and the menu still opens
     cb_calls = 0; track_calls = 0; right_click();
     CHECK(cb_calls == 0 && track_calls == 1);       // right click opens the menu
     stop();
@@ -871,6 +886,8 @@ static void on_delete(void)
 }
 static void exit_again(void) { wintray_exit(); CHECK(wintray_init(&t_menu) == -1); }
 static void close_window(void) { wnd_proc(W, WM_CLOSE, 0, 0); }
+static void reopen(void) { close_window(); CHECK(wintray_init(&t_menu) == 0); }
+static void update_then_close(void) { wintray_update(g_tray); close_window(); }
 static void test_closing(void)
 {
     printf("closing\n");
@@ -883,7 +900,7 @@ static void test_closing(void)
 
     start(&t_menu);                                 // closed from outside
     wnd_proc(W, WM_CLOSE, 0, 0);                    // as taskkill without /f sends it
-    CHECK(window == NULL);                          // forgotten once it is really gone
+    CHECK(!IsWindow(W));
     closed();
     without_window();                               // after the window was closed
     CHECK(find_class(CLASS_NAME, this_module()) != NULL);   // class still registered
@@ -932,6 +949,40 @@ static void test_closing(void)
     wintray_exit();                                 // so exit still destroys the window
     CHECK(!WIN(W).alive && find_class(CLASS_NAME, this_module()) == NULL);
     closed();
+    start(&t_menu);                                 // destroyed by the program itself
+    DestroyWindow(W);
+    closed();
+    without_window();                               // exit then has nothing to do
+    WNDCLASSW otherc = {0};
+    otherc.lpfnWndProc = DefWindowProcW;
+    otherc.hInstance = this_module();
+    otherc.lpszClassName = L"Other";
+    CHECK(RegisterClassW(&otherc) != 0);
+    HWND other = CreateWindowW(L"Other", L"", 0, 0, 0, 0, 0, NULL, NULL, this_module(), NULL);
+    window = other;                                 // as if Windows gave its handle to another
+    wintray_exit();
+    CHECK(IsWindow(other) && window == NULL);       // which stays
+    DestroyWindow(other);
+    UnregisterClassW(L"Other", this_module());
+
+    start(&t_menu);                                 // window commands that Windows lets through
+    static const UINT sc[] = {SC_CLOSE, SC_MINIMIZE, SC_MAXIMIZE, SC_RESTORE};   // from lower integrity
+    for (int i = 0; i < (int)ARRAYSIZE(sc); i++)
+        wnd_proc(W, WM_SYSCOMMAND, sc[i], 0);
+    CHECK(hwnd == W && !WIN(W).shown && quit_posted == 0);   // do nothing
+    stop();
+
+    start(&t_menu);                                 // exit and init inside the open menu
+    click(exit_again, 0);                           // (init is refused there)
+    closed();
+    start(&t_menu);                                 // closed and made anew while the click's
+    notify_on = NIM_MODIFY; notify_hook = reopen;   // update waits for Explorer
+    CHECK(click(hook_update, ID_FIRST) == 0);       // the click was for the old window
+    CHECK(wintray_loop(0) == -1);                   // whose WM_QUIT comes first
+    stop();
+    start(&t_menu);                                 // closed with an update waiting
+    click(update_then_close, ID_FIRST);
+    closed();                                       // which goes with it
 
     start(&t_menu);                                 // exit and init again while the
     notify_on = NIM_DELETE; notify_hook = exit_again;   // window is being destroyed
@@ -979,16 +1030,19 @@ static void test_icons(void)
     CHECK(loaded());
     t.icon_filepath = "C:\\bad.ico"; wintray_update(&t);
     CHECK(tray_icon() == SHARED);
-    static const char *const full[] = {"c:/good.ico", "\\\\server\\share\\good.ico", "\\\\?\\C:\\good.ico"};
+    static const char *const full[] = {"c:/good.ico", "\\\\server\\share\\good.ico", "//server/share/good.ico"};
     for (int i = 0; i < (int)ARRAYSIZE(full); i++) {
         t.icon_filepath = full[i]; wintray_update(&t);
         CHECK(loaded());                            // a full path in any form
     }
-    static const char *const relative[] = {"good.ico", "g\\good.ico", "C:good.ico", "\\good.ico"};
-    file_loads = 0;                                 // Windows would search for these,
-    for (int i = 0; i < (int)ARRAYSIZE(relative); i++) {
-        t.icon_filepath = relative[i]; wintray_update(&t);
-        CHECK(tray_icon() == SHARED);               // so they load nothing
+    // Windows would search for a relative path, and opens a device for "\\.\"
+    // and "\\?\", so these load nothing.
+    static const char *const refused[] = {"good.ico", "g\\good.ico", "C:good.ico", "\\good.ico",
+                                          "\\\\.\\gpipe", "//./gcom", "\\\\?\\C:\\good.ico", "//?/C:/good.ico"};
+    file_loads = 0;
+    for (int i = 0; i < (int)ARRAYSIZE(refused); i++) {
+        t.icon_filepath = refused[i]; wintray_update(&t);
+        CHECK(tray_icon() == SHARED);
     }
     CHECK(file_loads == 0);
     static char path[MAX_PATH + 1];                 // a path is used whole or not at all:
@@ -1005,6 +1059,8 @@ static void test_icons(void)
     t.icon_id = 2; icon_in_exe = icon_in_dll = 1;   // only the exe has icon 2
     wintray_update(&t);
     CHECK(loaded() && last_res == 2);
+    t.icon_id = 65535; wintray_update(&t);
+    CHECK(loaded() && last_res == 65535);           // the largest ID there is
     t.icon_id = 65537;                              // over 16 bits: no icon, rather than icon 1
     wintray_update(&t);
     CHECK(tray_icon() == SHARED);
@@ -1019,6 +1075,8 @@ static void test_icons(void)
     CHECK(this_module() == (mode_dll ? DLL : EXE));
 }
 
+static struct wintray t_two = {NULL, "two", NULL, menu1, 1};
+static void update_lost(void) { explorer = DOWN; wintray_update(&t_two); explorer = UP; }
 static void test_explorer(void)
 {
     printf("explorer\n");
@@ -1065,6 +1123,12 @@ static void test_explorer(void)
     notify_on = NIM_MODIFY; notify_hook = close_window;
     CHECK(click(hook_update, ID_FIRST) == 0);       // so the click doesn't run
     closed();
+
+    start(&t_menu);                                 // an update made while another one waits
+    notify_on = NIM_MODIFY; notify_hook = update_lost;   // for Explorer, which loses it
+    wintray_update(&t_menu);
+    CHECK(timer_hwnd == W && wsame(nid.szTip, L"two"));   // the newer one is retried
+    stop();
 }
 
 static void test_loop(void)
@@ -1079,6 +1143,8 @@ static void test_loop(void)
     CHECK(wintray_loop(0) == 0 && dispatched == 1 && !pending.message);
     pending = (MSG){NULL, WM_TIMER, 7, 0, 0, {0, 0}};
     CHECK(wintray_loop(1) == 0 && dispatched == 2 && !pending.message);
+    PostQuitMessage(0);                             // a WM_QUIT of the program's own
+    CHECK(wintray_loop(0) == -1 && hwnd == W && nshown == 1);   // ends the loop, the icon stays
     wintray_exit();
     closed_at(__LINE__, 1);                         // the blocking loop sees WM_QUIT too
 }

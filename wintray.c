@@ -21,10 +21,9 @@
 static struct wintray *g_tray;
 static NOTIFYICONDATAW nid;
 static HWND  hwnd;
-static HWND  window;                 // hwnd until destroy_window() destroys it; messages
-                                     // that another program sends clear only hwnd
+static HWND  window;                 // the window wintray made, maybe gone since; see
+                                     // still_there()
 static int   closing;                // cleanup() is running
-static int   destroying;             // inside destroy_window()
 static HMENU hmenu;
 static HICON own_icon;               // the icon in nid if we loaded it, else NULL
 static int   menu_open;
@@ -148,15 +147,17 @@ static HINSTANCE this_module(void)
     return m;
 }
 
-// "C:\..." or "C:/...", or a network or device path ("\\server\...", "\\?\...").
-// LoadImageW looks for any other path in the program's folder, the current
-// folder and every folder on the PATH, where another program may have put a
-// file of that name.
+static int slash(wchar_t c) { return c == '\\' || c == '/'; }
+
+// "C:\..." or "C:/...", or a network path ("\\server\share\..."). LoadImageW
+// looks for any other path in the program's folder, the current folder and
+// every folder on the PATH, where another program may have put a file of that
+// name, and "\\.\" and "\\?\" paths can open a device such as a pipe or a port.
 static int full_path(const wchar_t *p)
 {
-    if ((p[0] == '\\' || p[0] == '/') && (p[1] == '\\' || p[1] == '/'))
-        return 1;
-    return (unsigned)((p[0] | 0x20) - 'a') < 26 && p[1] == ':' && (p[2] == '\\' || p[2] == '/');
+    if (slash(p[0]) && slash(p[1]))
+        return !((p[2] == '.' || p[2] == '?') && slash(p[3]));
+    return (unsigned)((p[0] | 0x20) - 'a') < 26 && p[1] == ':' && slash(p[2]);
 }
 
 // The icon from icon_id or icon_filepath, or NULL.
@@ -191,18 +192,22 @@ static HICON load_icon(const struct wintray *t)
 // an Explorer restart), so fall back to NIM_ADD. If that fails too, Explorer
 // is probably busy (e.g. right after login): retry every 2 seconds.
 // The window can close while Shell_NotifyIconW waits, so check hwnd after
-// each call: no icon for a closed window, and no SetTimer(NULL, ...).
+// each call: no icon for a closed window, and no SetTimer(NULL, ...). An update
+// made meanwhile calls show_icon() again with newer data, and that call decides
+// about NIM_ADD and the timer.
 static void show_icon(void)
 {
+    static unsigned calls;
+    unsigned me = ++calls;
     int ok = Shell_NotifyIconW(NIM_MODIFY, &nid);
-    if (!ok && hwnd) {
+    if (!ok && hwnd && calls == me) {
         ok = Shell_NotifyIconW(NIM_ADD, &nid);
         // Closed meanwhile: Explorer may still add the icon after cleanup()'s
         // NIM_DELETE, even when NIM_ADD reported a timeout.
         if (!hwnd)
             Shell_NotifyIconW(NIM_DELETE, &nid);
     }
-    if (!hwnd)
+    if (!hwnd || calls != me)
         return;
     if (ok)
         KillTimer(hwnd, RETRY_TIMER);
@@ -223,12 +228,13 @@ static int update_and_check(UINT i)
     }
     void (*cb)(struct wintray_menu_item *) = built[i].cb;
     UINT flags = built[i].flags;
+    HWND w = hwnd;
     wchar_t was[MAX_TEXT], now[MAX_TEXT];
     was[0] = now[0] = 0;
     GetMenuStringW(hmenu, ID_FIRST + i, was, ARRAYSIZE(was), MF_BYCOMMAND);
     wintray_update(g_tray);
-    // A window closed meanwhile has freed its menu, and item_count is 0.
-    if (i >= item_count || built[i].cb != cb || built[i].flags != flags)
+    // Not for a window closed or made anew meanwhile.
+    if (hwnd != w || i >= item_count || built[i].cb != cb || built[i].flags != flags)
         return 0;
     GetMenuStringW(hmenu, ID_FIRST + i, now, ARRAYSIZE(now), MF_BYCOMMAND);
     for (int k = 0; was[k] == now[k]; k++)
@@ -282,28 +288,20 @@ static void cleanup(void)
     closing = 0;
 }
 
-// Another program can send WM_DESTROY and WM_NCDESTROY without the window being
-// destroyed, so window is forgotten only in a DestroyWindow that wintray called.
-static void destroy_window(HWND w)
-{
-    destroying++;
-    DestroyWindow(w);
-    destroying--;
-}
-
 static LRESULT CALLBACK wnd_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
 {
-    if (msg == WM_NCDESTROY && w == window && destroying)
-        window = NULL;
-    // WM_CLOSE (taskkill without /f, an installer, SC_CLOSE) does what
-    // DefWindowProc would, through destroy_window(). While cleanup() runs, the
-    // window is already on its way out.
-    if (msg == WM_CLOSE) {
-        if (!closing)
-            destroy_window(w);
+    // A WM_CLOSE while cleanup() runs would destroy the window a second time.
+    if (msg == WM_CLOSE && closing)
         return 0;
+    // Windows lets the taskbar's close, minimize and restore commands through
+    // from programs of lower integrity. The hidden window takes none of them.
+    if (msg == WM_SYSCOMMAND) {
+        UINT sc = (UINT)wp & 0xFFF0;
+        if (sc == SC_CLOSE || sc == SC_MINIMIZE || sc == SC_MAXIMIZE || sc == SC_RESTORE)
+            return 0;
     }
-    if (!hwnd)                       // still in CreateWindowW, or closing
+    // Still in CreateWindowW, closing, or after a WM_DESTROY from another program.
+    if (!hwnd)
         return DefWindowProcW(w, msg, wp, lp);
     if (msg == WM_TRAY) {
         // A double-click gives DOWN, UP, DBLCLK, UP: skip the second UP. Timing
@@ -335,14 +333,26 @@ static LRESULT CALLBACK wnd_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProcW(w, msg, wp, lp);
 }
 
+// Whether w is still the window wintray made. Another program can send it
+// WM_DESTROY and WM_NCDESTROY and leave it standing, and the program may destroy
+// it itself, so window is checked where it is used. Its window procedure tells
+// it from another window that got the same handle later.
+static int still_there(HWND w)
+{
+    return w && IsWindow(w) && (WNDPROC)GetWindowLongPtrW(w, GWLP_WNDPROC) == wnd_proc;
+}
+
 struct wintray *wintray_get_instance(void) { return g_tray; }
 
 int wintray_init(struct wintray *tray)
 {
-    if (!tray || hwnd || closing)
+    // Not while the menu is open: its window may be closing, and the new one
+    // would get no menu until it closes.
+    if (!tray || hwnd || closing || menu_open)
         return -1;
-    if (window)                      // left over by a WM_DESTROY from another program
-        destroy_window(window);
+    if (still_there(window))         // left by a WM_DESTROY from another program
+        DestroyWindow(window);
+    window = NULL;
     wm_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
 
     // Hidden window for the icon messages. Not a message-only window, because
@@ -425,9 +435,12 @@ void wintray_exit(void)
 {
     // window, not hwnd: after a WM_DESTROY from another program, the window is
     // still there. Not while cleanup() runs: that is usually inside DestroyWindow.
-    if (window && !closing) {
-        destroy_window(window);      // the rest happens in WM_DESTROY
+    if (closing)
+        return;
+    if (still_there(window)) {
+        DestroyWindow(window);       // the rest happens in WM_DESTROY
         // Windows doesn't unregister a DLL's classes when the DLL is unloaded.
         UnregisterClassW(CLASS_NAME, this_module());
     }
+    window = NULL;
 }

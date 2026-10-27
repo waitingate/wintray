@@ -82,13 +82,17 @@ gcc -Os -s -mwindows -static -o app.exe app.c wintray.c app_rc.o -luser32 -lshel
 ```
 
 Or load it from a file at run time with `.icon_filepath`. Give the full path,
-such as `"C:\\Tools\\icon.ico"`. A relative path loads no icon: Windows would
-look for it in the current folder and in every folder on the PATH, where
-another program may have put a file of that name.
+such as `"C:\\Program Files\\My Tool\\icon.ico"`, in a folder that only you or
+administrators can change. A relative path loads no icon: Windows would look
+for it in the program's folder, the current folder and every folder on the
+PATH, where another program may have put a file of that name. Paths that start
+with `\\.\` or `\\?\` load no icon either, since they can open a device. A
+network path works, but then Windows connects to that server with your login
+on every `wintray_update()`, and wintray waits for it.
 
 If the icon can't be loaded, the tray shows the standard icon, and wintray
 reports no error. That happens with an `icon_id` that isn't in the program, a
-missing file, a relative path, and a path that is too long (see
+missing file, a relative or device path, and a path that is too long (see
 [Limits](#limits)) or not valid UTF-8: such a path is never cut short, so it
 can't name another file.
 
@@ -325,7 +329,8 @@ struct wintray *wintray_get_instance(void);
   `wintray_update()` call took out of the menu are not used again, so they may
   be freed once it returns.
 - In menu text, `&` underlines the next letter as a shortcut key. Write `&&`
-  for a real `&`.
+  for a real `&`. So text from elsewhere, such as file names, needs every `&`
+  doubled, and a text that is just `-` becomes a separator.
 - `wintray_update()` and `wintray_exit()` do nothing while there is no icon
   window: until a `wintray_init()` succeeds, and after `wintray_exit()` or the
   window being closed, until the next one. So code that fills in the tooltip
@@ -349,6 +354,9 @@ struct wintray *wintray_get_instance(void);
   they can run `cb` or open the menu, though choosing an item still takes the
   user. Don't let `cb` start anything that an ordinary program shouldn't.
 - If Explorer restarts, the icon comes back on its own.
+- If another program closes the icon's window (taskkill without /f, an
+  installer), the icon goes away and `wintray_loop()` returns -1, as after
+  `wintray_exit()`.
 - `wintray_exit()` posts `WM_QUIT`, which ends every message loop on the
   thread: a `MessageBox` shown after it in the same callback closes at once.
   To show the icon again, call `wintray_init()` once `wintray_loop()` has
@@ -377,7 +385,8 @@ One icon per program, up to 256 menu items and 256 submenus (8 levels deep),
 255 characters per menu item and 127 for the tooltip, counted in UTF-16 units:
 most emoji count as two. Longer text is cut between characters, which can
 split an emoji made of several, such as a flag. An icon file path can have up
-to 259 units; a longer one isn't cut, it loads no icon. Windows 7 or later.
+to 259 units; a longer one isn't cut, it loads no icon, and neither does a
+relative or device path. Windows 7 or later.
 
 ## Coming from zserge/tray or dmikushin/tray
 
@@ -394,8 +403,8 @@ your initializers.
 
 ## Testing
 
-Tested with MinGW-w64 GCC 13.2 (WinLibs), with the test programs running under
-Wine.
+Built with MinGW-w64 GCC 13.2 (WinLibs). The checks by hand below are done on
+Windows 11; earlier versions were also run under Wine.
 
 On Linux, `sh test/run.sh` tests the library against fake Win32 functions,
 including clicks at awkward moments. GitHub Actions runs it for every push to

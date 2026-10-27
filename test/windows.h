@@ -8,6 +8,7 @@ typedef int BOOL;
 typedef unsigned int UINT;
 typedef unsigned int DWORD;
 typedef intptr_t LRESULT;
+typedef intptr_t LONG_PTR;
 typedef uintptr_t WPARAM;
 typedef intptr_t LPARAM;
 typedef uintptr_t UINT_PTR;
@@ -35,6 +36,7 @@ typedef struct {
 #define WM_CLOSE         0x0010
 #define WM_QUIT          0x0012
 #define WM_NCDESTROY     0x0082
+#define WM_SYSCOMMAND    0x0112
 #define WM_TIMER         0x0113
 #define WM_LBUTTONDOWN   0x0201
 #define WM_LBUTTONUP     0x0202
@@ -64,6 +66,11 @@ typedef struct {
 #define PM_REMOVE        0x0001
 #define MSGFLT_ALLOW     1
 #define CS_NOCLOSE       0x0200
+#define SC_MINIMIZE      0xF020
+#define SC_MAXIMIZE      0xF030
+#define SC_CLOSE         0xF060
+#define SC_RESTORE       0xF120
+#define GWLP_WNDPROC     (-4)
 #define GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT 0x2
 #define GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS       0x4
 
@@ -93,6 +100,8 @@ unsigned short RegisterClassW(const WNDCLASSW *);
 BOOL UnregisterClassW(LPCWSTR, HINSTANCE);
 HWND CreateWindowW(LPCWSTR, LPCWSTR, DWORD, int, int, int, int, HWND, HMENU, HINSTANCE, void *);
 BOOL DestroyWindow(HWND);
+BOOL IsWindow(HWND);
+LONG_PTR GetWindowLongPtrW(HWND, int);
 BOOL ChangeWindowMessageFilterEx(HWND, UINT, DWORD, void *);
 BOOL GetMessageW(MSG *, HWND, UINT, UINT);
 BOOL PeekMessageW(MSG *, HWND, UINT, UINT, UINT);
