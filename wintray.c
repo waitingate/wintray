@@ -150,12 +150,12 @@ static HINSTANCE this_module(void)
 
 static int slash(wchar_t c) { return c == '\\' || c == '/'; }
 
-// Whether the path part at s, up to the next backslash, is name (in lowercase)
-// in any case.
+// Whether the path part at s, up to the next backslash, is name (in lowercase),
+// with its letters in any case.
 static int part_is(const wchar_t *s, const char *name)
 {
-    while (*name)
-        if ((*s++ | 0x20) != *name++)
+    for (; *name; s++, name++)
+        if (*s != *name && !(*name >= 'a' && *name <= 'z' && (*s | 0x20) == *name))
             return 0;
     return !*s || *s == '\\';
 }

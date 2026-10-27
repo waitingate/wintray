@@ -1119,7 +1119,8 @@ static void test_icons(void)
     t.icon_filepath = "C:\\bad.ico"; wintray_update(&t);
     CHECK(tray_icon() == SHARED);
     static const char *const full[] = {"c:/good.ico", "\\\\server\\share\\good.ico", "//server/share/good.ico",
-                                       "\\\\server\\pipes\\good.ico", "\\\\server\\ipc\\good.ico"};
+                                       "\\\\server\\pipes\\good.ico", "\\\\server\\ipc\\good.ico",
+                                       "\\\\server\\ipc\x04\\good.ico"};
     for (int i = 0; i < (int)ARRAYSIZE(full); i++) {
         t.icon_filepath = full[i]; wintray_update(&t);
         CHECK(loaded());                            // a full path in any form
