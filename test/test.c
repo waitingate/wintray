@@ -234,7 +234,8 @@ BOOL EndMenu(void) { end_menu_called = 1; return TRUE; }
 #define SHARED ((HICON)(uintptr_t)0xABCDE0)
 static int i_live[MAXM], icons_created, icons_live;
 static int icon_in_dll, icon_in_exe = 1, from_dll, from_exe;
-static int last_res, file_loads, last_path_len;   // the resource ID last loaded, and the files
+static int last_res, file_loads;            // the resource ID last loaded, and the files
+static wchar_t last_path[MAX_PATH + 1];
 HANDLE LoadImageW(HINSTANCE h, LPCWSTR name, UINT type, int cx, int cy, UINT fl)
 {
     (void)type;
@@ -242,7 +243,10 @@ HANDLE LoadImageW(HINSTANCE h, LPCWSTR name, UINT type, int cx, int cy, UINT fl)
     int ok = 0, res = (int)(uintptr_t)name;
     if (fl & LR_LOADFROMFILE) {
         file_loads++;
-        last_path_len = wlen(name);
+        int k = 0;
+        for (; name[k] && k < MAX_PATH; k++)
+            last_path[k] = name[k];
+        last_path[k] = 0;
         LPCWSTR file = name;                // files whose names start with g exist
         for (LPCWSTR p = name; *p; p++)
             if (*p == '\\' || *p == '/')
@@ -279,6 +283,67 @@ BOOL DestroyIcon(HICON i)
     return TRUE;
 }
 int GetSystemMetrics(int i) { (void)i; return 16; }
+// As on Windows 11: slashes become backslashes, empty and "." parts go, ".."
+// takes off the part before it but never the drive or "\\server\share", dots
+// and spaces at the end go, and a file named NUL in any folder is the device
+// "\\.\NUL" (other device names, such as COM1, are file names in a folder).
+// "\\.\" and "\\?\" paths are taken apart like "\\server\share".
+DWORD GetFullPathNameW(LPCWSTR p, DWORD size, wchar_t *out, wchar_t **file)
+{
+    wchar_t r[2 * MAX_PATH];
+    int n = 0, i;
+    CHECK(file == NULL && wlen(p) < MAX_PATH);
+    if (slash(p[0]) && slash(p[1])) {
+        r[n++] = '\\';
+        r[n++] = '\\';
+        i = 2;
+        for (int part = 0; part < 2; part++) {      // server and share
+            while (p[i] && !slash(p[i]))
+                r[n++] = p[i++];
+            while (slash(p[i]))
+                i++;
+            r[n++] = '\\';
+        }
+    } else {
+        CHECK(p[1] == ':' && slash(p[2]));          // wintray asks only for full paths
+        r[n++] = p[0]; r[n++] = ':'; r[n++] = '\\';
+        i = 3;
+    }
+    int root = n;
+    while (p[i]) {                                  // each part gets a backslash after it
+        int start = i;
+        while (p[i] && !slash(p[i]))
+            i++;
+        int len = i - start;
+        while (slash(p[i]))
+            i++;
+        if (len == 2 && p[start] == '.' && p[start + 1] == '.') {
+            if (n > root)
+                do n--; while (n > root && r[n - 1] != '\\');
+        } else if (len && !(len == 1 && p[start] == '.')) {
+            memcpy(r + n, p + start, len * sizeof *r);
+            n += len;
+            r[n++] = '\\';
+        }
+    }
+    if (n > 3)
+        n--;                                        // the last backslash, except in "C:\"
+    while (n > root && (r[n - 1] == '.' || r[n - 1] == ' '))
+        n--;
+    int last = n;
+    while (last > root && r[last - 1] != '\\')
+        last--;
+    if (r[1] == ':' && n - last == 3 && (r[last] | 0x20) == 'n' && (r[last + 1] | 0x20) == 'u' &&
+        (r[last + 2] | 0x20) == 'l') {
+        n = wlen(L"\\\\.\\NUL");
+        memcpy(r, L"\\\\.\\NUL", n * sizeof *r);
+    }
+    if ((DWORD)n >= size)
+        return n + 1;                               // the size it needs
+    memcpy(out, r, n * sizeof *r);
+    out[n] = 0;
+    return n;
+}
 
 /* ---------------- classes and windows ---------------- */
 // Messages that only the fakes and tests use.
@@ -315,13 +380,16 @@ BOOL UnregisterClassW(LPCWSTR name, HINSTANCE inst)
     c->used = 0;
     return TRUE;
 }
-struct win { int alive, dying; struct cls *c; int shown; };   // alive until DestroyWindow starts
+// alive until DestroyWindow starts; proc is the window's own procedure, which
+// subclassing changes, and the one messages go to.
+struct win { int alive, dying; struct cls *c; int shown; WNDPROC proc; };
 static struct win wins[1000];
 static int nwins;
 static HWND timer_hwnd;                     // the window timer that is set, if any
 static UINT_PTR timer_id;
 #define WIN(h) wins[(uintptr_t)(h) / 16]
 static int fail_create;                     // CreateWindowW fails, as when out of resources
+static int fail_destroy;                    // DestroyWindow fails, as from another thread
 HWND CreateWindowW(LPCWSTR cls, LPCWSTR title, DWORD st, int x, int y, int w, int h,
                    HWND parent, HMENU menu, HINSTANCE inst, void *param)
 {
@@ -330,7 +398,7 @@ HWND CreateWindowW(LPCWSTR cls, LPCWSTR title, DWORD st, int x, int y, int w, in
     if (!c || fail_create)
         return NULL;
     HWND hw = (HWND)(uintptr_t)(++nwins * 16);
-    WIN(hw) = (struct win){1, 0, c, 0};
+    WIN(hw) = (struct win){1, 0, c, 0, c->proc};
     c->windows++;
     if (!c->proc(hw, WM_NCCREATE, 0, 0)) {  // FALSE: no window
         WIN(hw).alive = 0;
@@ -346,12 +414,12 @@ HWND CreateWindowW(LPCWSTR cls, LPCWSTR title, DWORD st, int x, int y, int w, in
 BOOL DestroyWindow(HWND hw)
 {
     CHECK(!WIN(hw).dying);                  // not again while it is being destroyed
-    if (!WIN(hw).alive)
+    if (!WIN(hw).alive || fail_destroy)
         return FALSE;
     WIN(hw).alive = 0;
     WIN(hw).dying = 1;
-    WIN(hw).c->proc(hw, WM_DESTROY, 0, 0);
-    WIN(hw).c->proc(hw, WM_NCDESTROY, 0, 0);
+    WIN(hw).proc(hw, WM_DESTROY, 0, 0);
+    WIN(hw).proc(hw, WM_NCDESTROY, 0, 0);
     WIN(hw).dying = 0;
     WIN(hw).c->windows--;
     KillTimer(hw, timer_id);                // a window's timers go with it
@@ -361,10 +429,10 @@ BOOL IsWindow(HWND hw)                      // also while it is being destroyed
 {
     return hw && (uintptr_t)hw / 16 < ARRAYSIZE(wins) && (WIN(hw).alive || WIN(hw).dying);
 }
-LONG_PTR GetWindowLongPtrW(HWND hw, int i)
+ULONG_PTR GetClassLongPtrW(HWND hw, int i)
 {
-    CHECK(i == GWLP_WNDPROC && IsWindow(hw));
-    return IsWindow(hw) ? (LONG_PTR)WIN(hw).c->proc : 0;
+    CHECK(i == GCLP_WNDPROC && IsWindow(hw));
+    return IsWindow(hw) ? (ULONG_PTR)WIN(hw).c->proc : 0;
 }
 
 /* ---------------- Explorer ---------------- */
@@ -451,9 +519,9 @@ static int nulls_posted;
 BOOL PostMessageW(HWND h, UINT m, WPARAM w, LPARAM l) { (void)w; (void)l; nulls_posted += h && m == WM_NULL; return TRUE; }
 void PostQuitMessage(int c) { (void)c; quit_posted++; }
 // What Windows does with the messages wintray leaves to it. Alt+F4 is as in
-// Wine, which closes the window unless its class has CS_NOCLOSE; Windows 11
-// ignores Alt+F4 for this window either way. Wine posts the SC_CLOSE; here it
-// comes at once.
+// Wine, which sends SC_CLOSE unless the window's class has CS_NOCLOSE; Windows
+// 11 ignores Alt+F4 for this window. Wine posts the SC_CLOSE; here it comes at
+// once.
 LRESULT DefWindowProcW(HWND h, UINT m, WPARAM w, LPARAM l)
 {
     CHECK(WIN(h).c != NULL);                // a window that was created
@@ -462,9 +530,9 @@ LRESULT DefWindowProcW(HWND h, UINT m, WPARAM w, LPARAM l)
     if (m == WM_NCCREATE || m == WM_QUERYENDSESSION)
         return TRUE;                        // go on creating the window; the session may end
     if (m == WM_SYSKEYDOWN && w == VK_F4 && (l & 1 << 29) && !(WIN(h).c->style & CS_NOCLOSE))
-        return WIN(h).c->proc(h, WM_SYSCOMMAND, SC_CLOSE, 0);   // Alt+F4
+        return WIN(h).proc(h, WM_SYSCOMMAND, SC_CLOSE, 0);   // Alt+F4
     if (m == WM_SYSCOMMAND && (w & 0xFFF0) == SC_CLOSE)
-        return WIN(h).c->proc(h, WM_CLOSE, 0, 0);
+        return WIN(h).proc(h, WM_CLOSE, 0, 0);
     if (m == WM_SYSCOMMAND && ((w & 0xFFF0) == SC_MINIMIZE || (w & 0xFFF0) == SC_MAXIMIZE ||
                                (w & 0xFFF0) == SC_RESTORE))
         WIN(h).shown = 1;                   // a hidden window shows, with a taskbar button
@@ -852,6 +920,7 @@ static void test_menu(void)
     CHECK(click(hook_update, ID_FIRST + 4) == 1 && last_item == &sub1[0]);   // an update that changed nothing
     CHECK(click(gray_sub, ID_FIRST + 4) == 0);      // its submenu was grayed out meanwhile
     CHECK(sub_flags[menus_created] == (MF_POPUP | MF_GRAYED));   // and shows it
+    flagm[4].disabled = 0;
     stop();
 
     // An update made while the menu was open runs when it closes, before the
@@ -886,7 +955,10 @@ static void on_delete(void)
 }
 static void exit_again(void) { wintray_exit(); CHECK(wintray_init(&t_menu) == -1); }
 static void close_window(void) { wnd_proc(W, WM_CLOSE, 0, 0); }
-static void reopen(void) { close_window(); CHECK(wintray_init(&t_menu) == 0); }
+// init is refused while Shell_NotifyIconW waits for Explorer.
+static void reopen(void) { close_window(); CHECK(wintray_init(&t_menu) == -1); }
+static int sub_msgs;                            // messages the program's subclass got
+static LRESULT subclass(HWND h, UINT m, WPARAM w, LPARAM l) { sub_msgs++; return wnd_proc(h, m, w, l); }
 static void update_then_close(void) { wintray_update(g_tray); close_window(); }
 static void test_closing(void)
 {
@@ -939,9 +1011,10 @@ static void test_closing(void)
     start(&t_menu);                                 // or the next init does
     stop();
     start(&t_menu);                                 // a WM_NCDESTROY from another program
-    wnd_proc(W, WM_NCDESTROY, 0, 0);
-    CHECK(window == W);                             // doesn't make wintray forget the window
-    stop();
+    wnd_proc(W, WM_NCDESTROY, 0, 0);                // doesn't make wintray forget the window,
+    wintray_exit();                                 // which exit destroys
+    CHECK(!WIN(W).alive);
+    closed();
     start(&t_menu);                                 // nor do both, one after the other
     wnd_proc(W, WM_DESTROY, 0, 0);
     wnd_proc(W, WM_NCDESTROY, 0, 0);
@@ -964,6 +1037,22 @@ static void test_closing(void)
     CHECK(IsWindow(other) && window == NULL);       // which stays
     DestroyWindow(other);
     UnregisterClassW(L"Other", this_module());
+    start(&t_menu);                                 // subclassed by the program: still
+    WIN(W).proc = subclass;                         // wintray's window
+    sub_msgs = 0;
+    wintray_exit();
+    CHECK(!WIN(W).alive && sub_msgs == 2);          // WM_DESTROY, WM_NCDESTROY
+    closed();
+    start(&t_menu);                                 // left by a WM_DESTROY from another
+    wnd_proc(W, WM_DESTROY, 0, 0);                  // program, where DestroyWindow fails
+    fail_destroy = 1;
+    wintray_exit();
+    CHECK(WIN(W).alive && window == W);             // is kept for another try
+    CHECK(wintray_init(&t_menu) == -1 && window == W);
+    fail_destroy = 0;
+    wintray_exit();
+    CHECK(!WIN(W).alive && find_class(CLASS_NAME, this_module()) == NULL);
+    closed();
 
     start(&t_menu);                                 // window commands that Windows lets through
     static const UINT sc[] = {SC_CLOSE, SC_MINIMIZE, SC_MAXIMIZE, SC_RESTORE};   // from lower integrity
@@ -975,11 +1064,10 @@ static void test_closing(void)
     start(&t_menu);                                 // exit and init inside the open menu
     click(exit_again, 0);                           // (init is refused there)
     closed();
-    start(&t_menu);                                 // closed and made anew while the click's
-    notify_on = NIM_MODIFY; notify_hook = reopen;   // update waits for Explorer
-    CHECK(click(hook_update, ID_FIRST) == 0);       // the click was for the old window
-    CHECK(wintray_loop(0) == -1);                   // whose WM_QUIT comes first
-    stop();
+    start(&t_menu);                                 // closed while the click's update waits
+    notify_on = NIM_MODIFY; notify_hook = reopen;   // for Explorer, and not made anew
+    CHECK(click(hook_update, ID_FIRST) == 0);       // so the click doesn't run
+    closed();
     start(&t_menu);                                 // closed with an update waiting
     click(update_then_close, ID_FIRST);
     closed();                                       // which goes with it
@@ -1030,15 +1118,21 @@ static void test_icons(void)
     CHECK(loaded());
     t.icon_filepath = "C:\\bad.ico"; wintray_update(&t);
     CHECK(tray_icon() == SHARED);
-    static const char *const full[] = {"c:/good.ico", "\\\\server\\share\\good.ico", "//server/share/good.ico"};
+    static const char *const full[] = {"c:/good.ico", "\\\\server\\share\\good.ico", "//server/share/good.ico",
+                                       "\\\\server\\pipes\\good.ico"};
     for (int i = 0; i < (int)ARRAYSIZE(full); i++) {
         t.icon_filepath = full[i]; wintray_update(&t);
         CHECK(loaded());                            // a full path in any form
     }
-    // Windows would search for a relative path, and opens a device for "\\.\"
-    // and "\\?\", so these load nothing.
+    t.icon_filepath = "C:/dir/./sub/../good.ico"; wintray_update(&t);
+    CHECK(loaded() && wsame(last_path, L"C:\\dir\\good.ico"));   // loaded as Windows resolves it
+    // Windows would search for a relative path, opens a device for "\\.\",
+    // "\\?\" and a file named NUL, and a named pipe for "\\server\pipe\", so
+    // these load nothing.
     static const char *const refused[] = {"good.ico", "g\\good.ico", "C:good.ico", "\\good.ico",
-                                          "\\\\.\\gpipe", "//./gcom", "\\\\?\\C:\\good.ico", "//?/C:/good.ico"};
+                                          "\\\\.\\gpipe", "//./gcom", "\\\\?\\C:\\good.ico", "//?/C:/good.ico",
+                                          "C:\\gdir\\nul", "C:/NUL. ", "\\\\server\\pipe\\g",
+                                          "//server//PIPE//g", "\\\\localhost\\Pipe"};
     file_loads = 0;
     for (int i = 0; i < (int)ARRAYSIZE(refused); i++) {
         t.icon_filepath = refused[i]; wintray_update(&t);
@@ -1049,7 +1143,7 @@ static void test_icons(void)
     memcpy(path, "C:\\", 3);
     memset(path + 3, 'g', MAX_PATH - 4);            // the longest that fits
     file_loads = 0; t.icon_filepath = path; wintray_update(&t);
-    CHECK(file_loads == 1 && last_path_len == MAX_PATH - 1 && loaded());
+    CHECK(file_loads == 1 && wlen(last_path) == MAX_PATH - 1 && loaded());
     path[MAX_PATH - 1] = 'g';                       // one unit longer: not cut short
     wintray_update(&t);
     CHECK(file_loads == 1 && tray_icon() == SHARED);
@@ -1100,7 +1194,8 @@ static void test_explorer(void)
     // Closed while Shell_NotifyIconW waits for Explorer: no icon may be left for the
     // closed window, no further call may add or change one for it (ghosts), and no
     // SetTimer(NULL, ...). With Explorer down, NIM_ADD fails too; with Explorer slow,
-    // it reports a timeout but the icon is added anyway.
+    // it reports a timeout but the icon is added anyway. A wintray_init() then is
+    // refused, or the icon would stay.
     static const struct { DWORD call; int state; } cases[] = {
         {NIM_MODIFY, UP}, {NIM_ADD, UP}, {NIM_ADD, DOWN}, {NIM_ADD, SLOW}};
     for (int i = 0; i < (int)ARRAYSIZE(cases); i++) {
@@ -1110,7 +1205,7 @@ static void test_explorer(void)
             forget_icons();                         // so NIM_MODIFY fails and NIM_ADD follows
         explorer = cases[i].state;
         ghosts = 0;
-        notify_on = cases[i].call; notify_hook = close_window;
+        notify_on = cases[i].call; notify_hook = reopen;
         wnd_proc(W, TASKBAR_CREATED, 0, 0);
         explorer = UP;
         closed();
@@ -1118,11 +1213,6 @@ static void test_explorer(void)
         if (fails > before)
             printf("    in case %d\n", i);
     }
-
-    start(&t_menu);                                 // closed during the update the menu waited for
-    notify_on = NIM_MODIFY; notify_hook = close_window;
-    CHECK(click(hook_update, ID_FIRST) == 0);       // so the click doesn't run
-    closed();
 
     start(&t_menu);                                 // an update made while another one waits
     notify_on = NIM_MODIFY; notify_hook = update_lost;   // for Explorer, which loses it

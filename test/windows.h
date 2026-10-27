@@ -8,7 +8,7 @@ typedef int BOOL;
 typedef unsigned int UINT;
 typedef unsigned int DWORD;
 typedef intptr_t LRESULT;
-typedef intptr_t LONG_PTR;
+typedef uintptr_t ULONG_PTR;
 typedef uintptr_t WPARAM;
 typedef intptr_t LPARAM;
 typedef uintptr_t UINT_PTR;
@@ -70,7 +70,7 @@ typedef struct {
 #define SC_MAXIMIZE      0xF030
 #define SC_CLOSE         0xF060
 #define SC_RESTORE       0xF120
-#define GWLP_WNDPROC     (-4)
+#define GCLP_WNDPROC     (-24)
 #define GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT 0x2
 #define GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS       0x4
 
@@ -82,6 +82,7 @@ BOOL DestroyMenu(HMENU);
 int GetMenuStringW(HMENU, UINT, wchar_t *, int, UINT);
 int GetSystemMetrics(int);
 HANDLE LoadImageW(HINSTANCE, LPCWSTR, UINT, int, int, UINT);
+DWORD GetFullPathNameW(LPCWSTR, DWORD, wchar_t *, wchar_t **);
 HICON LoadIconW(HINSTANCE, LPCWSTR);
 BOOL DestroyIcon(HICON);
 HMODULE GetModuleHandleW(LPCWSTR);
@@ -101,7 +102,7 @@ BOOL UnregisterClassW(LPCWSTR, HINSTANCE);
 HWND CreateWindowW(LPCWSTR, LPCWSTR, DWORD, int, int, int, int, HWND, HMENU, HINSTANCE, void *);
 BOOL DestroyWindow(HWND);
 BOOL IsWindow(HWND);
-LONG_PTR GetWindowLongPtrW(HWND, int);
+ULONG_PTR GetClassLongPtrW(HWND, int);
 BOOL ChangeWindowMessageFilterEx(HWND, UINT, DWORD, void *);
 BOOL GetMessageW(MSG *, HWND, UINT, UINT);
 BOOL PeekMessageW(MSG *, HWND, UINT, UINT, UINT);

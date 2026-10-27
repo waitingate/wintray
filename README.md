@@ -86,13 +86,14 @@ such as `"C:\\Program Files\\My Tool\\icon.ico"`, in a folder that only you or
 administrators can change. A relative path loads no icon: Windows would look
 for it in the program's folder, the current folder and every folder on the
 PATH, where another program may have put a file of that name. Paths that start
-with `\\.\` or `\\?\` load no icon either, since they can open a device. A
-network path works, but then Windows connects to that server with your login
-on every `wintray_update()`, and wintray waits for it.
+with `\\.\` or `\\?\`, `NUL` in any folder and a named pipe such as
+`\\server\pipe\name` load no icon either, since they open a device or a pipe,
+not a file. A network path works, but then Windows connects to that server with
+your login on every `wintray_update()`, and wintray waits for it.
 
 If the icon can't be loaded, the tray shows the standard icon, and wintray
 reports no error. That happens with an `icon_id` that isn't in the program, a
-missing file, a relative or device path, and a path that is too long (see
+missing file, a relative, device or pipe path, and a path that is too long (see
 [Limits](#limits)) or not valid UTF-8: such a path is never cut short, so it
 can't name another file.
 
@@ -386,7 +387,7 @@ One icon per program, up to 256 menu items and 256 submenus (8 levels deep),
 most emoji count as two. Longer text is cut between characters, which can
 split an emoji made of several, such as a flag. An icon file path can have up
 to 259 units; a longer one isn't cut, it loads no icon, and neither does a
-relative or device path. Windows 7 or later.
+relative, device or pipe path. Windows 7 or later.
 
 ## Coming from zserge/tray or dmikushin/tray
 
