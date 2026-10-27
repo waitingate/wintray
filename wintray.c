@@ -150,13 +150,24 @@ static HINSTANCE this_module(void)
 
 static int slash(wchar_t c) { return c == '\\' || c == '/'; }
 
+// Whether the path part at s, up to the next backslash, is name (in lowercase)
+// in any case.
+static int part_is(const wchar_t *s, const char *name)
+{
+    while (*name)
+        if ((*s++ | 0x20) != *name++)
+            return 0;
+    return !*s || *s == '\\';
+}
+
 // Puts the full path of p in out (MAX_PATH units), or returns 0 if p isn't the
 // full path of a file: "C:\..." or "C:/...", or a network path
 // ("\\server\share\..."). LoadImageW looks for any other path in the program's
 // folder, the current folder and every folder on the PATH, where another
 // program may have put a file of that name. The resolved path is checked, since
 // a file named NUL in any folder comes out as "\\.\NUL": "\\.\" and "\\?\"
-// paths open devices, and "\\server\pipe\..." a named pipe.
+// paths open devices, the shares pipe and IPC$ open named pipes, and "\\;"
+// names a network redirector, with the server and share after it.
 static int full_path(const wchar_t *p, wchar_t *out)
 {
     int drive = (unsigned)((p[0] | 0x20) - 'a') < 26 && p[1] == ':' && slash(p[2]);
@@ -168,14 +179,11 @@ static int full_path(const wchar_t *p, wchar_t *out)
     if (out[0] != '\\')
         return 1;
     const wchar_t *s = out + 2;
-    if ((s[0] == '.' || s[0] == '?') && s[1] == '\\')
+    if (s[0] == ';' || ((s[0] == '.' || s[0] == '?') && s[1] == '\\'))
         return 0;
     while (*s && *s != '\\')         // past the server name
         s++;
-    for (int k = 0; k < 4; k++)      // a share named pipe, in any case
-        if (!s[0] || (s[k + 1] | 0x20) != "pipe"[k])
-            return 1;
-    return s[5] && s[5] != '\\';
+    return !*s || !(part_is(s + 1, "pipe") || part_is(s + 1, "ipc$"));
 }
 
 // The icon from icon_id or icon_filepath, or NULL.

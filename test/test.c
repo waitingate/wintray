@@ -249,7 +249,7 @@ HANDLE LoadImageW(HINSTANCE h, LPCWSTR name, UINT type, int cx, int cy, UINT fl)
         last_path[k] = 0;
         LPCWSTR file = name;                // files whose names start with g exist
         for (LPCWSTR p = name; *p; p++)
-            if (*p == '\\' || *p == '/')
+            if (slash(*p))
                 file = p + 1;
         ok = file[0] == 'g';
     } else if (h == DLL) {
@@ -1119,7 +1119,7 @@ static void test_icons(void)
     t.icon_filepath = "C:\\bad.ico"; wintray_update(&t);
     CHECK(tray_icon() == SHARED);
     static const char *const full[] = {"c:/good.ico", "\\\\server\\share\\good.ico", "//server/share/good.ico",
-                                       "\\\\server\\pipes\\good.ico"};
+                                       "\\\\server\\pipes\\good.ico", "\\\\server\\ipc\\good.ico"};
     for (int i = 0; i < (int)ARRAYSIZE(full); i++) {
         t.icon_filepath = full[i]; wintray_update(&t);
         CHECK(loaded());                            // a full path in any form
@@ -1127,12 +1127,14 @@ static void test_icons(void)
     t.icon_filepath = "C:/dir/./sub/../good.ico"; wintray_update(&t);
     CHECK(loaded() && wsame(last_path, L"C:\\dir\\good.ico"));   // loaded as Windows resolves it
     // Windows would search for a relative path, opens a device for "\\.\",
-    // "\\?\" and a file named NUL, and a named pipe for "\\server\pipe\", so
-    // these load nothing.
+    // "\\?\" and a file named NUL, and a named pipe for "\\server\pipe\",
+    // "\\server\IPC$\" and "\\;LanmanRedirector\server\pipe\", so these load
+    // nothing.
     static const char *const refused[] = {"good.ico", "g\\good.ico", "C:good.ico", "\\good.ico",
                                           "\\\\.\\gpipe", "//./gcom", "\\\\?\\C:\\good.ico", "//?/C:/good.ico",
                                           "C:\\gdir\\nul", "C:/NUL. ", "\\\\server\\pipe\\g",
-                                          "//server//PIPE//g", "\\\\localhost\\Pipe"};
+                                          "//server//PIPE//g", "\\\\localhost\\Pipe", "\\\\server\\IPC$\\g",
+                                          "//server/ipc$/g", "\\\\;LanmanRedirector\\server\\share\\g"};
     file_loads = 0;
     for (int i = 0; i < (int)ARRAYSIZE(refused); i++) {
         t.icon_filepath = refused[i]; wintray_update(&t);
