@@ -371,6 +371,14 @@ struct wintray *wintray_get_instance(void);
   `wintray_exit()` works only on the wintray thread. Post `WM_QUIT` to that
   thread (`PostThreadMessageW`), call `wintray_exit()` there once
   `wintray_loop()` returns -1, and wait for the thread to end.
+- Opening the menu takes the keyboard focus, so Windows loads its input method
+  (IME) support into the program. On Windows 11 with a Chinese input method
+  that was about 40 DLLs, 10 threads and 4 MB, kept until the program exits. A
+  program with nothing to type into can call `ImmDisableIME(-1)` (from
+  `<imm.h>`, link `imm32`) before `wintray_init()`. On a thread of its own, as
+  in a DLL, `ImmDisableIME(GetCurrentThreadId())` turns it off for that thread
+  only. wintray doesn't do this itself, because it would turn off Chinese,
+  Japanese and Korean typing in the program's own windows.
 - wintray needs C99 or later. With other compilers, add `wintray.c` to your
   project and link `user32` and `shell32`, and `kernel32` if your project
   leaves out the default libraries. I haven't tried MSVC yet. Without the C
