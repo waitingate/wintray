@@ -86,10 +86,11 @@ such as `"C:\\Program Files\\My Tool\\icon.ico"`, in a folder that only you or
 administrators can change. A relative path loads no icon: Windows would look
 for it in the program's folder, the current folder and every folder on the
 PATH, where another program may have put a file of that name. Paths that start
-with `\\.\` or `\\?\`, `NUL` in any folder and a named pipe such as
-`\\server\pipe\name` load no icon either, since they open a device or a pipe,
-not a file. A network path works, but then Windows connects to that server with
-your login on every `wintray_update()`, and wintray waits for it.
+with `\\.\`, `\\?\` or `\\;`, `NUL` in any folder and named pipes such as
+`\\server\pipe\name` and `\\server\IPC$\name` load no icon either, since they
+can open a device or a pipe, not a file. A network path works, but then Windows
+connects to that server with your login on every `wintray_update()`, and
+wintray waits for it.
 
 If the icon can't be loaded, the tray shows the standard icon, and wintray
 reports no error. That happens with an `icon_id` that isn't in the program, a
